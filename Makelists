@@ -79,6 +79,7 @@ HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-aat-layout.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-aat-map.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-blob.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-buffer.cc
+HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-buffer-verify.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-buffer-serialize.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-common.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-face.cc
@@ -107,9 +108,9 @@ HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-indic.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-indic-table.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-khmer.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-myanmar.cc
+HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-syllabic.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-thai.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-use.cc
-HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-use-table.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-complex-vowel-constraints.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-fallback.cc
 HARFBUZZ_SRC += thirdparty/harfbuzz/src/hb-ot-shape-normalize.cc
@@ -523,8 +524,14 @@ LEPTONICA_SRC += thirdparty/leptonica/src/zlibmemstub.c
 
 # --- TESSERACT (optional) ---
 
+TESSERACT_LANGFLAGS = -std=c++17
 TESSERACT_CFLAGS += -Ithirdparty/tesseract/include
 TESSERACT_CFLAGS += -Iscripts/tesseract
+
+TESSERACT_DEFINES  = -DTESSERACT_IMAGEDATA_AS_PIX
+TESSERACT_DEFINES += -DTESSERACT_DISABLE_DEBUG_FONTS
+TESSERACT_DEFINES += -DGRAPHICS_DISABLED
+TESSERACT_DEFINES += -DDISABLED_LEGACY_ENGINE
 
 TESSERACT_BUILD_CFLAGS += -Ithirdparty/tesseract/src
 TESSERACT_BUILD_CFLAGS += -Ithirdparty/tesseract/src/api
@@ -539,11 +546,7 @@ TESSERACT_BUILD_CFLAGS += -Ithirdparty/tesseract/src/textord
 TESSERACT_BUILD_CFLAGS += -Ithirdparty/tesseract/src/viewer
 TESSERACT_BUILD_CFLAGS += -Ithirdparty/tesseract/src/wordrec
 TESSERACT_BUILD_CFLAGS += -Ithirdparty/tesseract/src/cutil
-TESSERACT_BUILD_CFLAGS += -DTESSERACT_IMAGEDATA_AS_PIX
-TESSERACT_BUILD_CFLAGS += -DTESSERACT_DISABLE_DEBUG_FONTS
-TESSERACT_BUILD_CFLAGS += -DGRAPHICS_DISABLED
-TESSERACT_BUILD_CFLAGS += -DDISABLED_LEGACY_ENGINE
-TESSERACT_BUILD_CFLAGS += -std=c++17
+TESSERACT_BUILD_CFLAGS += $(TESSERACT_LANGFLAGS)
 
 TESSERACT_BUILD_CFLAGS += $(LEPTONICA_CFLAGS)
 
@@ -702,30 +705,41 @@ TESSERACT_SRC += thirdparty/tesseract/src/wordrec/tface.cpp
 TESSERACT_SRC += thirdparty/tesseract/src/wordrec/wordrec.cpp
 
 ifeq ($(HAVE_AVX),yes)
-TESSERACT_BUILD_CFLAGS += -mavx -DHAVE_AVX -D__AVX__
+TESSERACT_DEFINES += -DHAVE_AVX -D__AVX__
+TESSERACT_BUILD_CFLAGS += -mavx
 TESSERACT_SRC += thirdparty/tesseract/src/arch/dotproductavx.cpp
 endif
 
 ifeq ($(HAVE_AVX2),yes)
-TESSERACT_BUILD_CFLAGS += -mavx2 -DHAVE_AVX2 -D__AVX2__
+TESSERACT_DEFINES += -DHAVE_AVX2 -D__AVX2__
+TESSERACT_BUILD_CFLAGS += -mavx2
 TESSERACT_SRC += thirdparty/tesseract/src/arch/intsimdmatrixavx2.cpp
 endif
 
 ifeq ($(HAVE_FMA),yes)
-TESSERACT_BUILD_CFLAGS += -mfma -DHAVE_FMA -D__FMA__
+TESSERACT_DEFINES += -DHAVE_FMA -D__FMA__
+TESSERACT_BUILD_CFLAGS += -mfma
 TESSERACT_SRC += thirdparty/tesseract/src/arch/dotproductfma.cpp
 endif
 
 ifeq ($(HAVE_SSE4_1),yes)
-TESSERACT_BUILD_CFLAGS += -msse4.1 -DHAVE_SSE4_1 -D__SSE4_1__
+TESSERACT_DEFINES += -DHAVE_SSE4_1 -D__SSE4_1__
+TESSERACT_BUILD_CFLAGS += -msse4.1
 TESSERACT_SRC += thirdparty/tesseract/src/arch/dotproductsse.cpp
 TESSERACT_SRC += thirdparty/tesseract/src/arch/intsimdmatrixsse.cpp
 endif
 
 ifeq ($(HAVE_NEON),yes)
-TESSERACT_BUILD_CFLAGS += $(NEONFLAGS) -DHAVE_NEON
-TESSERACT_SRC += thirdparty/tesseract/src/arch/intsimdmatrixneon.cpp
+TESSERACT_DEFINES += -DHAVE_NEON
+TESSERACT_BUILD_CFLAGS += $(NEONFLAGS)
 endif
+# Always include the neon code - it will compile to nothing if
+# neon isn't enabled. We need to always include it, because it
+# will be used if __aarch64__ is defined, which implies the
+# presence of NEON even without the HAVE_NEON flags.
+TESSERACT_SRC += thirdparty/tesseract/src/arch/intsimdmatrixneon.cpp
+
+TESSERACT_BUILD_CFLAGS += $(TESSERACT_DEFINES)
 
 # --- EXTRACT ---
 

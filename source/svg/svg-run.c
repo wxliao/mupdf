@@ -1022,9 +1022,9 @@ svg_parse_common(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *st
 	if (fill_rule_att)
 	{
 		if (!strcmp(fill_rule_att, "nonzero"))
-			state->fill_rule = 1;
-		if (!strcmp(fill_rule_att, "evenodd"))
 			state->fill_rule = 0;
+		if (!strcmp(fill_rule_att, "evenodd"))
+			state->fill_rule = 1;
 	}
 
 	if (stroke_att)
@@ -1209,7 +1209,6 @@ svg_run_use_symbol(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *u
 
 	svg_parse_viewport(ctx, doc, use, &local_state);
 	svg_parse_viewbox(ctx, doc, use, &local_state);
-	svg_parse_common(ctx, doc, use, &local_state);
 
 	for (node = fz_xml_down(symbol); node; node = fz_xml_next(node))
 		svg_run_element(ctx, dev, doc, node, &local_state);

@@ -101,9 +101,12 @@ static jclass cls_DisplayList;
 static jclass cls_Document;
 static jclass cls_DocumentWriter;
 static jclass cls_DocumentWriter_OCRListener;
+static jclass cls_DOM;
+static jclass cls_DOMAttribute;
 static jclass cls_FitzInputStream;
 static jclass cls_FloatArray;
 static jclass cls_Font;
+static jclass cls_HTMLStory;
 static jclass cls_IOException;
 static jclass cls_IllegalArgumentException;
 static jclass cls_Image;
@@ -177,11 +180,16 @@ static jfieldID fid_DisplayList_pointer;
 static jfieldID fid_DocumentWriter_ocrlistener;
 static jfieldID fid_DocumentWriter_pointer;
 static jfieldID fid_Document_pointer;
+static jfieldID fid_DOM_pointer;
+static jfieldID fid_DOMAttribute_attribute;
+static jfieldID fid_DOMAttribute_value;
 static jfieldID fid_FitzInputStream_closed;
 static jfieldID fid_FitzInputStream_markpos;
 static jfieldID fid_FitzInputStream_pointer;
 static jfieldID fid_Font_pointer;
+static jfieldID fid_HTMLStory_pointer;
 static jfieldID fid_Image_pointer;
+static jfieldID fid_Link_pointer;
 static jfieldID fid_LinkDestination_chapter;
 static jfieldID fid_LinkDestination_height;
 static jfieldID fid_LinkDestination_page;
@@ -292,6 +300,8 @@ static jmethodID mid_Device_strokeText;
 static jmethodID mid_DisplayList_init;
 static jmethodID mid_DocumentWriter_OCRListener_progress;
 static jmethodID mid_Document_init;
+static jmethodID mid_DOM_init;
+static jmethodID mid_DOMAttribute_init;
 static jmethodID mid_FitzInputStream_init;
 static jmethodID mid_Font_init;
 static jmethodID mid_Image_init;
@@ -826,6 +836,15 @@ static int find_fids(JNIEnv *env)
 	cls_DocumentWriter_OCRListener = get_class(&err, env, PKG"DocumentWriter$OCRListener");
 	mid_DocumentWriter_OCRListener_progress = get_method(&err, env, "progress", "(II)Z");
 
+	cls_DOM = get_class(&err, env, PKG"DOM");
+	fid_DOM_pointer = get_field(&err, env, "pointer", "J");
+	mid_DOM_init = get_method(&err, env, "<init>", "(J)V");
+
+	cls_DOMAttribute = get_class(&err, env, PKG"DOM$DOMAttribute");
+	fid_DOMAttribute_attribute = get_field(&err, env, "attribute", "Ljava/lang/String;");
+	fid_DOMAttribute_value = get_field(&err, env, "value", "Ljava/lang/String;");
+	mid_DOMAttribute_init = get_method(&err, env, "<init>", "()V");
+
 	cls_FitzInputStream = get_class(&err, env, PKG"FitzInputStream");
 	fid_FitzInputStream_pointer = get_field(&err, env, "pointer", "J");
 	fid_FitzInputStream_markpos = get_field(&err, env, "markpos", "J");
@@ -836,12 +855,16 @@ static int find_fids(JNIEnv *env)
 	fid_Font_pointer = get_field(&err, env, "pointer", "J");
 	mid_Font_init = get_method(&err, env, "<init>", "(J)V");
 
+	cls_HTMLStory = get_class(&err, env, PKG"HTMLStory");
+	fid_HTMLStory_pointer = get_field(&err, env, "pointer", "J");
+
 	cls_Image = get_class(&err, env, PKG"Image");
 	fid_Image_pointer = get_field(&err, env, "pointer", "J");
 	mid_Image_init = get_method(&err, env, "<init>", "(J)V");
 
 	cls_Link = get_class(&err, env, PKG"Link");
-	mid_Link_init = get_method(&err, env, "<init>", "(L"PKG"Rect;Ljava/lang/String;)V");
+	fid_Link_pointer = get_field(&err, env, "pointer", "J");
+	mid_Link_init = get_method(&err, env, "<init>", "(J)V");
 
 	cls_Location = get_class(&err, env, PKG"Location");
 	mid_Location_init = get_method(&err, env, "<init>", "(II)V");
@@ -904,7 +927,7 @@ static int find_fids(JNIEnv *env)
 	fid_LinkDestination_zoom = get_field(&err, env, "zoom", "F");
 
 	cls_PDFDocument_JsEventListener = get_class(&err, env, PKG"PDFDocument$JsEventListener");
-	mid_PDFDocument_JsEventListener_onAlert = get_method(&err, env, "onAlert", "(L"PKG"PDFDocument;Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;Z)L"PKG"PDFDocument$JsEventListener$AlertResult;");
+	mid_PDFDocument_JsEventListener_onAlert = get_method(&err, env, "onAlert", "(L"PKG"PDFDocument;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;Z)L"PKG"PDFDocument$JsEventListener$AlertResult;");
 
 	cls_PDFDocument_PDFEmbeddedFileParams = get_class(&err, env, PKG"PDFDocument$PDFEmbeddedFileParams");
 	mid_PDFDocument_PDFEmbeddedFileParams_init = get_method(&err, env, "<init>", "(Ljava/lang/String;Ljava/lang/String;IJJ)V");
@@ -1141,9 +1164,12 @@ static void lose_fids(JNIEnv *env)
 	(*env)->DeleteGlobalRef(env, cls_DisplayList);
 	(*env)->DeleteGlobalRef(env, cls_Document);
 	(*env)->DeleteGlobalRef(env, cls_DocumentWriter);
+	(*env)->DeleteGlobalRef(env, cls_DOM);
+	(*env)->DeleteGlobalRef(env, cls_DOMAttribute);
 	(*env)->DeleteGlobalRef(env, cls_FitzInputStream);
 	(*env)->DeleteGlobalRef(env, cls_FloatArray);
 	(*env)->DeleteGlobalRef(env, cls_Font);
+	(*env)->DeleteGlobalRef(env, cls_HTMLStory);
 	(*env)->DeleteGlobalRef(env, cls_IOException);
 	(*env)->DeleteGlobalRef(env, cls_IllegalArgumentException);
 	(*env)->DeleteGlobalRef(env, cls_Image);
@@ -1255,6 +1281,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved)
 #include "jni/fitzinputstream.c"
 #include "jni/font.c"
 #include "jni/image.c"
+#include "jni/link.c"
 #include "jni/outlineiterator.c"
 #include "jni/page.c"
 #include "jni/path.c"
@@ -1272,6 +1299,8 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved)
 #include "jni/strokestate.c"
 #include "jni/structuredtext.c"
 #include "jni/text.c"
+#include "jni/htmlstory.c"
+#include "jni/dom.c"
 
 #ifdef HAVE_ANDROID
 #include "jni/android/androiddrawdevice.c"
