@@ -653,7 +653,7 @@ static void insert_box(fz_context *ctx, fz_html_box *box, int type, fz_html_box 
 
 static fz_html_box *insert_block_box(fz_context *ctx, fz_html_box *box, fz_html_box *top)
 {
-	if (top->type == BOX_BLOCK)
+	if (top->type == BOX_BLOCK || top->type == BOX_TABLE_CELL)
 	{
 		insert_box(ctx, box, BOX_BLOCK, top);
 	}
