@@ -36,6 +36,13 @@ typedef struct
 {
 	int chapter;
 	int page;
+    int page_offset;
 } fz_location;
+
+typedef struct
+{
+    int chapter;
+    int seq;
+} fz_flow_mark;
 
 #endif

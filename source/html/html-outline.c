@@ -262,51 +262,59 @@ make_box_bookmark(fz_context *ctx, fz_html_box *box, float y)
 	return NULL;
 }
 
-fz_bookmark
-fz_make_html_bookmark(fz_context *ctx, fz_html *html, int page)
+int
+fz_make_html_bookmark(fz_context *ctx, fz_html *html, int page, int page_offset)
 {
-	return (fz_bookmark)make_box_bookmark(ctx, html->tree.root, page * html->page_h);
-}
-
-static int
-lookup_flow_bookmark(fz_context *ctx, fz_html_flow *flow, fz_html_flow *mark)
-{
-	while (flow)
-	{
-		if (flow == mark)
-			return 1;
-		flow = flow->next;
-	}
+    fz_html_flow *flow = make_box_bookmark(ctx, html->tree.root, page * html->page_h + page_offset);
+    if(flow){
+        return flow->seq;
+    }
 	return 0;
 }
 
-static int
-lookup_box_bookmark(fz_context *ctx, fz_html_box *box, fz_html_flow *mark)
+static fz_html_flow *
+lookup_flow_bookmark(fz_context *ctx, fz_html_flow *flow, int seq)
 {
+	while (flow)
+	{
+		if (flow->seq == seq)
+			return flow;
+		flow = flow->next;
+	}
+	return NULL;
+}
+
+static fz_html_flow *
+lookup_box_bookmark(fz_context *ctx, fz_html_box *box, int seq)
+{
+    fz_html_flow *mark;
 	while (box)
 	{
 		if (box->type == BOX_FLOW)
 		{
-			if (lookup_flow_bookmark(ctx, box->flow_head, mark))
-				return 1;
+			mark = lookup_flow_bookmark(ctx, box->flow_head, seq);
+            if(mark)
+				return mark;
 		}
 		else
 		{
-			if (lookup_box_bookmark(ctx, box->down, mark))
-				return 1;
+            mark = lookup_box_bookmark(ctx, box->down, seq);
+            if(mark)
+                return mark;
 		}
 		box = box->next;
 	}
-	return 0;
+	return NULL;
 }
 
-int
-fz_lookup_html_bookmark(fz_context *ctx, fz_html *html, fz_bookmark mark)
+fz_html_flow *
+fz_lookup_html_bookmark(fz_context *ctx, fz_html *html, int seq)
 {
-	fz_html_flow *flow = (fz_html_flow*)mark;
-	if (flow && lookup_box_bookmark(ctx, html->tree.root, flow))
-		return (int)(flow->y / html->page_h);
-	return -1;
+//	fz_html_flow *flow = (fz_html_flow*)mark;
+//    if (flow && lookup_box_bookmark(ctx, html->tree.root, flow))
+//        return (int)(flow->y / html->page_h);
+//    return -1;
+	return lookup_box_bookmark(ctx, html->tree.root, seq);
 }
 
 struct outline_parser

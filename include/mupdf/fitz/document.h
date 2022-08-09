@@ -42,7 +42,7 @@ typedef intptr_t fz_bookmark;
 */
 static inline fz_location fz_make_location(int chapter, int page)
 {
-	fz_location loc = { chapter, page };
+	fz_location loc = { chapter, page, 0 };
 	return loc;
 }
 

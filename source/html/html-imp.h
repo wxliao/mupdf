@@ -296,6 +296,7 @@ typedef struct
 	fz_storable storable;
 	fz_pool *pool; /* pool allocator for this html tree */
 	fz_html_box *root;
+	int seq;
 } fz_html_tree;
 
 struct fz_html_s
@@ -396,6 +397,7 @@ struct fz_html_box_s
 	float padding[4];
 	float margin[4];
 	float border[4];
+	int seq;
 };
 
 static inline int
@@ -434,6 +436,8 @@ struct fz_html_flow_s
 
 	/* Whether the markup specifies a given language. */
 	unsigned int markup_lang : 15;
+
+	int seq;
 
 	float x, y, w, h;
 	fz_html_box *box; /* for style and em */
@@ -490,8 +494,8 @@ float fz_find_html_target(fz_context *ctx, fz_html *html, const char *id);
 fz_link *fz_load_html_links(fz_context *ctx, fz_html *html, int page, const char *base_uri);
 fz_html *fz_keep_html(fz_context *ctx, fz_html *html);
 void fz_drop_html(fz_context *ctx, fz_html *html);
-fz_bookmark fz_make_html_bookmark(fz_context *ctx, fz_html *html, int page);
-int fz_lookup_html_bookmark(fz_context *ctx, fz_html *html, fz_bookmark mark);
+int fz_make_html_bookmark(fz_context *ctx, fz_html *html, int page, int page_offset);
+fz_html_flow *fz_lookup_html_bookmark(fz_context *ctx, fz_html *html, int seq);
 void fz_debug_html(fz_context *ctx, fz_html_box *box);
 
 fz_html *fz_store_html(fz_context *ctx, fz_html *html, void *doc, int chapter);
