@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -130,12 +130,25 @@ fz_path *
 fz_keep_path(fz_context *ctx, const fz_path *pathc)
 {
 	fz_path *path = (fz_path *)pathc; /* Explicit cast away of const */
+	int trimmable = 0;
 
 	if (path == NULL)
 		return NULL;
+	fz_lock(ctx, FZ_LOCK_ALLOC);
+	/* Technically, we should only access ->refs with the lock held,
+	 * so do that here. We can't actually do the trimming here, because
+	 * to do so would do memory accesses with the ALLOC lock held. */
 	if (path->refs == 1 && path->packed == FZ_PATH_UNPACKED)
+		trimmable = 1;
+	fz_keep_imp8_locked(ctx, path, &path->refs);
+	fz_unlock(ctx, FZ_LOCK_ALLOC);
+
+	/* This is thread safe, because we know that the only person
+	 * holding a reference to this thread is us. */
+	if (trimmable)
 		fz_trim_path(ctx, path);
-	return fz_keep_imp8(ctx, path, &path->refs);
+
+	return path;
 }
 
 void
@@ -177,7 +190,7 @@ int fz_packed_path_size(const fz_path *path)
 }
 
 size_t
-fz_pack_path(fz_context *ctx, uint8_t *pack_, size_t max, const fz_path *path)
+fz_pack_path(fz_context *ctx, uint8_t *pack_, const fz_path *path)
 {
 	uint8_t *ptr;
 	size_t size;
@@ -187,9 +200,6 @@ fz_pack_path(fz_context *ctx, uint8_t *pack_, size_t max, const fz_path *path)
 		fz_packed_path *pack = (fz_packed_path *)path;
 		fz_packed_path *out = (fz_packed_path *)pack_;
 		size = sizeof(fz_packed_path) + sizeof(float) * pack->coord_len + sizeof(uint8_t) * pack->cmd_len;
-
-		if (size > max)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Can't pack a path that small!");
 
 		if (out)
 		{
@@ -205,12 +215,9 @@ fz_pack_path(fz_context *ctx, uint8_t *pack_, size_t max, const fz_path *path)
 	size = sizeof(fz_packed_path) + sizeof(float) * path->coord_len + sizeof(uint8_t) * path->cmd_len;
 
 	/* If the path can't be packed flat, then pack it open */
-	if (path->cmd_len > 255 || path->coord_len > 255 || size > max)
+	if (path->cmd_len > 255 || path->coord_len > 255)
 	{
 		fz_path *pack = (fz_path *)pack_;
-
-		if (sizeof(fz_path) > max)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Can't pack a path that small!");
 
 		if (pack != NULL)
 		{

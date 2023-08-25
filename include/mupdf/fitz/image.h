@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #ifndef MUPDF_FITZ_IMAGE_H
 #define MUPDF_FITZ_IMAGE_H
@@ -62,7 +62,7 @@ typedef struct fz_pixmap_image fz_pixmap_image;
 	h: If non-NULL, a pointer to an int to be updated on exit to the
 	height (in pixels) that the scaled output will cover.
 
-	Returns a non NULL pixmap pointer. May throw exceptions.
+	Returns a non NULL kept pixmap pointer. May throw exceptions.
 */
 fz_pixmap *fz_get_pixmap_from_image(fz_context *ctx, fz_image *image, const fz_irect *subarea, fz_matrix *ctm, int *w, int *h);
 
@@ -291,6 +291,8 @@ void fz_drop_image_base(fz_context *ctx, fz_image *image);
 	subsampling that should be performed by this routine. This will
 	be updated on exit to the amount of subsampling that is still
 	required to be done.
+
+	Returns a kept reference.
 */
 fz_pixmap *fz_decomp_image_from_stream(fz_context *ctx, fz_stream *stm, fz_compressed_image *image, fz_irect *subarea, int indexed, int l2factor, int *l2extra);
 
@@ -327,7 +329,6 @@ struct fz_image
 	unsigned int interpolate:1;
 	unsigned int use_colorkey:1;
 	unsigned int use_decode:1;
-	unsigned int invert_cmyk_jpeg:1;
 	unsigned int decoded:1;
 	unsigned int scalable:1;
 	uint8_t orientation;

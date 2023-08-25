@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -385,6 +385,26 @@ void fz_lock_debug_unlock(fz_context *ctx, int lock)
 #ifdef FITZ_DEBUG_LOCKING_TIMES
 	fz_lock_time[idx][lock] += ms_clock() - fz_lock_taken[idx][lock];
 #endif
+}
+
+#else
+
+void
+(fz_assert_lock_held)(fz_context *ctx, int lock)
+{
+}
+
+void
+(fz_assert_lock_not_held)(fz_context *ctx, int lock)
+{
+}
+
+void (fz_lock_debug_lock)(fz_context *ctx, int lock)
+{
+}
+
+void (fz_lock_debug_unlock)(fz_context *ctx, int lock)
+{
 }
 
 #endif

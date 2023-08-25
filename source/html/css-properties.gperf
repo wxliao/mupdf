@@ -21,6 +21,7 @@ border-right,PRO_BORDER_RIGHT
 border-right-color,PRO_BORDER_RIGHT_COLOR
 border-right-style,PRO_BORDER_RIGHT_STYLE
 border-right-width,PRO_BORDER_RIGHT_WIDTH
+border-spacing,PRO_BORDER_SPACING
 border-style,PRO_BORDER_STYLE
 border-top,PRO_BORDER_TOP
 border-top-color,PRO_BORDER_TOP_COLOR
@@ -48,6 +49,7 @@ margin-left,PRO_MARGIN_LEFT
 margin-right,PRO_MARGIN_RIGHT
 margin-top,PRO_MARGIN_TOP
 orphans,PRO_ORPHANS
+overflow-wrap,PRO_OVERFLOW_WRAP
 padding,PRO_PADDING
 padding-bottom,PRO_PADDING_BOTTOM
 padding-left,PRO_PADDING_LEFT
@@ -58,6 +60,7 @@ page-break-before,PRO_PAGE_BREAK_BEFORE
 quotes,PRO_QUOTES
 src,PRO_SRC
 text-align,PRO_TEXT_ALIGN
+text-decoration,PRO_TEXT_DECORATION
 text-indent,PRO_TEXT_INDENT
 text-transform,PRO_TEXT_TRANSFORM
 vertical-align,PRO_VERTICAL_ALIGN

@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -74,11 +74,11 @@ size_t fz_skip(fz_context *ctx, fz_stream *stm, size_t len)
 fz_buffer *
 fz_read_all(fz_context *ctx, fz_stream *stm, size_t initial)
 {
-	return fz_read_best(ctx, stm, initial, NULL);
+	return fz_read_best(ctx, stm, initial, NULL, 0);
 }
 
 fz_buffer *
-fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated)
+fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated, size_t worst_case)
 {
 	fz_buffer *buf = NULL;
 	int check_bomb = (initial > 0);
@@ -88,6 +88,11 @@ fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated)
 
 	if (truncated)
 		*truncated = 0;
+
+	if (worst_case == 0)
+		worst_case = initial * 200;
+	if (worst_case < MIN_BOMB)
+		worst_case = MIN_BOMB;
 
 	fz_try(ctx)
 	{
@@ -101,7 +106,7 @@ fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated)
 			if (buf->len == buf->cap)
 				fz_grow_buffer(ctx, buf);
 
-			if (check_bomb && buf->len >= MIN_BOMB && buf->len / 200 > initial)
+			if (check_bomb && buf->len > worst_case)
 				fz_throw(ctx, FZ_ERROR_GENERIC, "compression bomb detected");
 
 			n = fz_read(ctx, stm, buf->data + buf->len, buf->cap - buf->len);
@@ -207,6 +212,33 @@ fz_read_file(fz_context *ctx, const char *filename)
 	fz_var(buf);
 
 	stm = fz_open_file(ctx, filename);
+	fz_try(ctx)
+	{
+		buf = fz_read_all(ctx, stm, 0);
+	}
+	fz_always(ctx)
+	{
+		fz_drop_stream(ctx, stm);
+	}
+	fz_catch(ctx)
+	{
+		fz_rethrow(ctx);
+	}
+
+	return buf;
+}
+
+fz_buffer *
+fz_try_read_file(fz_context *ctx, const char *filename)
+{
+	fz_stream *stm;
+	fz_buffer *buf = NULL;
+
+	fz_var(buf);
+
+	stm = fz_try_open_file(ctx, filename);
+	if (stm == NULL)
+		return NULL;
 	fz_try(ctx)
 	{
 		buf = fz_read_all(ctx, stm, 0);

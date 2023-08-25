@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 package example;
 
@@ -208,7 +208,7 @@ class StoryTest
 		/* First, one with precooked content. */
 		DocumentWriter writer = new DocumentWriter("out.pdf", "PDF", "");
 
-		HTMLStory story = new HTMLStory(snark, "", 11);
+		Story story = new Story(snark, "", 11);
 
 		boolean more;
 
@@ -234,7 +234,7 @@ class StoryTest
 		/* Now one with programmatic content */
 		writer = new DocumentWriter("out2.pdf", "PDF", "");
 
-		story = new HTMLStory("", "", 11);
+		story = new Story("", "", 11);
 
 		DOM dom = story.document();
 
@@ -271,7 +271,7 @@ class StoryTest
 		/* Now a combination of the two */
 		writer = new DocumentWriter("out3.pdf", "PDF", "");
 
-		story = new HTMLStory(festival_template, "", 11);
+		story = new Story(festival_template, "", 11);
 
 		dom = story.document();
 

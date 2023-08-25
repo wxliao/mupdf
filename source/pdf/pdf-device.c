@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
@@ -573,11 +573,14 @@ pdf_dev_text_span(fz_context *ctx, pdf_device *pdev, fz_text_span *span)
 		else if (enc == ENC_UNICODE)
 			fz_append_printf(ctx, gs->buf, "%04x", it->ucs);
 
-		adv = fz_advance_glyph(ctx, span->font, it->gid, span->wmode);
-		if (span->wmode == 0)
-			trm = fz_pre_translate(trm, adv, 0);
-		else
-			trm = fz_pre_translate(trm, 0, adv);
+		if (it->gid != -1)
+		{
+			adv = fz_advance_glyph(ctx, span->font, it->gid, span->wmode);
+			if (span->wmode == 0)
+				trm = fz_pre_translate(trm, adv, 0);
+			else
+				trm = fz_pre_translate(trm, 0, adv);
+		}
 	}
 
 	fz_append_string(ctx, gs->buf, ">]TJ\n");
@@ -1231,14 +1234,13 @@ fz_device *pdf_new_pdf_device(fz_context *ctx, pdf_document *doc, fz_matrix topc
 
 	fz_try(ctx)
 	{
-		if (buf)
-			buf = fz_keep_buffer(ctx, buf);
-		else
-			buf = fz_new_buffer(ctx, 256);
 		dev->doc = doc;
 		dev->resources = pdf_keep_obj(ctx, resources);
 		dev->gstates = fz_malloc_struct(ctx, gstate);
-		dev->gstates[0].buf = buf;
+		if (buf)
+			dev->gstates[0].buf = fz_keep_buffer(ctx, buf);
+		else
+			dev->gstates[0].buf = fz_new_buffer(ctx, 256);
 		dev->gstates[0].ctm = fz_identity; // XXX
 		dev->gstates[0].colorspace[0] = fz_device_gray(ctx);
 		dev->gstates[0].colorspace[1] = fz_device_gray(ctx);
@@ -1251,12 +1253,11 @@ fz_device *pdf_new_pdf_device(fz_context *ctx, pdf_document *doc, fz_matrix topc
 		dev->max_gstates = 1;
 
 		if (!fz_is_identity(topctm))
-			fz_append_printf(ctx, buf, "%M cm\n", &topctm);
+			fz_append_printf(ctx, dev->gstates[0].buf, "%M cm\n", &topctm);
 	}
 	fz_catch(ctx)
 	{
-		fz_drop_buffer(ctx, buf);
-		fz_free(ctx, dev);
+		fz_drop_device(ctx, &dev->super);
 		fz_rethrow(ctx);
 	}
 

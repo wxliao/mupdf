@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "draw-imp.h"
@@ -224,7 +224,7 @@ fz_subpixel_adjust(fz_context *ctx, fz_matrix *ctm, fz_matrix *subpix_ctm, unsig
 }
 
 fz_glyph *
-fz_render_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix *trm, fz_matrix ctm, const fz_stroke_state *stroke, const fz_irect *scissor, int aa)
+fz_render_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix *trm, fz_matrix ctm, fz_colorspace *model, const fz_stroke_state *stroke, const fz_irect *scissor, int aa)
 {
 	if (fz_font_ft_face(ctx, font))
 	{
@@ -236,7 +236,7 @@ fz_render_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix *trm,
 		(void)fz_subpixel_adjust(ctx, trm, &subpix_trm, &qe, &qf);
 		return fz_render_ft_stroked_glyph(ctx, font, gid, subpix_trm, ctm, stroke, aa);
 	}
-	return fz_render_glyph(ctx, font, gid, trm, NULL, scissor, 1, aa);
+	return fz_render_glyph(ctx, font, gid, trm, model, scissor, 1, aa);
 }
 
 static unsigned do_hash(unsigned char *s, int len)

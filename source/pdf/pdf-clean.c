@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "pdf-annot-imp.h"
@@ -27,18 +27,18 @@
 #include <assert.h>
 
 static void
-pdf_filter_xobject(fz_context *ctx, pdf_document *doc, pdf_obj *xobj, pdf_obj *page_res, pdf_filter_options *filter, pdf_cycle_list *cycle_up);
+pdf_filter_xobject(fz_context *ctx, pdf_document *doc, pdf_obj *xobj, pdf_obj *page_res, pdf_filter_options *options, pdf_cycle_list *cycle_up);
 
 static void
-pdf_filter_type3(fz_context *ctx, pdf_document *doc, pdf_obj *obj, pdf_obj *page_res, pdf_filter_options *filter, pdf_cycle_list *cycle_up);
+pdf_filter_type3(fz_context *ctx, pdf_document *doc, pdf_obj *obj, pdf_obj *page_res, pdf_filter_options *options, pdf_cycle_list *cycle_up);
 
 static void
-pdf_filter_resources(fz_context *ctx, pdf_document *doc, pdf_obj *in_res, pdf_obj *res, pdf_filter_options *filter, pdf_cycle_list *cycle_up)
+pdf_filter_resources(fz_context *ctx, pdf_document *doc, pdf_obj *in_res, pdf_obj *res, pdf_filter_options *options, pdf_cycle_list *cycle_up)
 {
 	pdf_obj *obj;
 	int i, n;
 
-	if (!filter->recurse)
+	if (!options->recurse)
 		return;
 
 	/* ExtGState */
@@ -55,7 +55,7 @@ pdf_filter_resources(fz_context *ctx, pdf_document *doc, pdf_obj *in_res, pdf_ob
 				if (g)
 				{
 					/* Transparency group XObject */
-					pdf_filter_xobject(ctx, doc, g, in_res, filter, cycle_up);
+					pdf_filter_xobject(ctx, doc, g, in_res, options, cycle_up);
 				}
 			}
 		}
@@ -71,13 +71,13 @@ pdf_filter_resources(fz_context *ctx, pdf_document *doc, pdf_obj *in_res, pdf_ob
 			pdf_obj *pat = pdf_dict_get_val(ctx, obj, i);
 			if (pat && pdf_dict_get_int(ctx, pat, PDF_NAME(PatternType)) == 1)
 			{
-				pdf_filter_xobject(ctx, doc, pat, in_res, filter, cycle_up);
+				pdf_filter_xobject(ctx, doc, pat, in_res, options, cycle_up);
 			}
 		}
 	}
 
 	/* XObject */
-	if (!filter->instance_forms)
+	if (!options->instance_forms)
 	{
 		obj = pdf_dict_get(ctx, res, PDF_NAME(XObject));
 		if (obj)
@@ -88,7 +88,7 @@ pdf_filter_resources(fz_context *ctx, pdf_document *doc, pdf_obj *in_res, pdf_ob
 				pdf_obj *xobj = pdf_dict_get_val(ctx, obj, i);
 				if (xobj && pdf_dict_get(ctx, xobj, PDF_NAME(Subtype)) == PDF_NAME(Form))
 				{
-					pdf_filter_xobject(ctx, doc, xobj, in_res, filter, cycle_up);
+					pdf_filter_xobject(ctx, doc, xobj, in_res, options, cycle_up);
 				}
 			}
 		}
@@ -104,7 +104,7 @@ pdf_filter_resources(fz_context *ctx, pdf_document *doc, pdf_obj *in_res, pdf_ob
 			pdf_obj *font = pdf_dict_get_val(ctx, obj, i);
 			if (font && pdf_dict_get(ctx, font, PDF_NAME(Subtype)) == PDF_NAME(Type3))
 			{
-				pdf_filter_type3(ctx, doc, font, in_res, filter, cycle_up);
+				pdf_filter_type3(ctx, doc, font, in_res, options, cycle_up);
 			}
 		}
 	}
@@ -130,45 +130,50 @@ pdf_filter_content_stream(
 	pdf_obj *in_stm,
 	pdf_obj *in_res,
 	fz_matrix transform,
-	pdf_filter_options *filter,
+	pdf_filter_options *options,
 	int struct_parents,
 	fz_buffer **out_buf,
 	pdf_obj **out_res,
 	pdf_cycle_list *cycle_up)
 {
 	pdf_processor *proc_buffer = NULL;
-	pdf_processor *proc_filter = NULL;
+	pdf_processor *top = NULL;
+	pdf_processor **list = NULL;
+	int num_filters = 0;
+	int i;
 
 	fz_var(proc_buffer);
-	fz_var(proc_filter);
 
 	*out_buf = NULL;
 	*out_res = NULL;
 
+	if (options->filters)
+		for (; options->filters[num_filters].filter != NULL; num_filters++);
+
+	if (num_filters > 0)
+		list = fz_calloc(ctx, num_filters, sizeof(pdf_processor *));
+
 	fz_try(ctx)
 	{
 		*out_buf = fz_new_buffer(ctx, 1024);
-		proc_buffer = pdf_new_buffer_processor(ctx, *out_buf, filter->ascii);
-		if (filter->sanitize)
+		top = proc_buffer = pdf_new_buffer_processor(ctx, *out_buf, options->ascii);
+		if (num_filters > 0)
 		{
-			*out_res = pdf_new_dict(ctx, doc, 1);
-			proc_filter = pdf_new_filter_processor(ctx, doc, proc_buffer, in_res, *out_res, struct_parents, transform, filter);
-			pdf_process_contents(ctx, proc_filter, doc, in_res, in_stm, NULL);
-			pdf_close_processor(ctx, proc_filter);
+			for (i = num_filters - 1; i >= 0; i--)
+				top = list[i] = options->filters[i].filter(ctx, doc, top, struct_parents, transform, options, options->filters[i].options);
 		}
-		else
-		{
-			*out_res = pdf_keep_obj(ctx, in_res);
-			pdf_process_contents(ctx, proc_buffer, doc, in_res, in_stm, NULL);
-		}
-		pdf_close_processor(ctx, proc_buffer);
 
-		pdf_filter_resources(ctx, doc, in_res, *out_res, filter, cycle_up);
+		pdf_process_contents(ctx, top, doc, in_res, in_stm, NULL, out_res);
+		pdf_close_processor(ctx, top);
+
+		pdf_filter_resources(ctx, doc, in_res, *out_res, options, cycle_up);
 	}
 	fz_always(ctx)
 	{
-		pdf_drop_processor(ctx, proc_filter);
+		for (i = 0; i < num_filters; i++)
+			pdf_drop_processor(ctx, list[i]);
 		pdf_drop_processor(ctx, proc_buffer);
+		fz_free(ctx, list);
 	}
 	fz_catch(ctx)
 	{
@@ -186,7 +191,7 @@ pdf_filter_content_stream(
 	shared between all off the CharProcs.
 */
 static void
-pdf_filter_type3(fz_context *ctx, pdf_document *doc, pdf_obj *obj, pdf_obj *page_res, pdf_filter_options *filter, pdf_cycle_list *cycle_up)
+pdf_filter_type3(fz_context *ctx, pdf_document *doc, pdf_obj *obj, pdf_obj *page_res, pdf_filter_options *options, pdf_cycle_list *cycle_up)
 {
 	pdf_cycle_list cycle;
 	pdf_processor *proc_buffer = NULL;
@@ -195,10 +200,19 @@ pdf_filter_type3(fz_context *ctx, pdf_document *doc, pdf_obj *obj, pdf_obj *page
 	pdf_obj *out_res = NULL;
 	pdf_obj *charprocs;
 	int i, n;
+	int num_filters = 0;
+	pdf_processor **list = NULL;
+	fz_buffer *buffer = NULL;
+	pdf_processor *top = NULL;
+	pdf_obj *res = NULL;
+	fz_buffer *new_buf = NULL;
 
 	fz_var(out_res);
 	fz_var(proc_buffer);
 	fz_var(proc_filter);
+	fz_var(buffer);
+	fz_var(res);
+	fz_var(new_buf);
 
 	/* We cannot combine instancing with type3 fonts. The new names for
 	 * instanced form/image resources would clash, since they start over for
@@ -206,11 +220,17 @@ pdf_filter_type3(fz_context *ctx, pdf_document *doc, pdf_obj *obj, pdf_obj *page
 	 * use instancing with redaction, and redaction doesn't clean type3
 	 * fonts.
 	 */
-	assert(!filter->instance_forms);
+	assert(!options->instance_forms);
 
 	/* Avoid recursive cycles! */
 	if (pdf_cycle(ctx, &cycle, cycle_up, obj))
 		return;
+
+	if (options->filters)
+		for (; options->filters[num_filters].filter != NULL; num_filters++);
+
+	if (num_filters > 0)
+		list = fz_calloc(ctx, num_filters, sizeof(pdf_processor *));
 
 	fz_try(ctx)
 	{
@@ -218,63 +238,56 @@ pdf_filter_type3(fz_context *ctx, pdf_document *doc, pdf_obj *obj, pdf_obj *page
 		if (!in_res)
 			in_res = page_res;
 
-		if (filter->sanitize)
-			out_res = pdf_new_dict(ctx, doc, 1);
-		else
-			out_res = pdf_keep_obj(ctx, in_res);
+		buffer = fz_new_buffer(ctx, 1024);
+		top = proc_buffer = pdf_new_buffer_processor(ctx, buffer, options->ascii);
+		if (num_filters > 0)
+		{
+			for (i = num_filters - 1; i >= 0; i--)
+				top = list[i] = options->filters[i].filter(ctx, doc, top, -1, fz_identity, options, options->filters[i].options);
+		}
 
+		pdf_processor_push_resources(ctx, top, in_res);
 		charprocs = pdf_dict_get(ctx, obj, PDF_NAME(CharProcs));
 		n = pdf_dict_len(ctx, charprocs);
 		for (i = 0; i < n; i++)
 		{
 			pdf_obj *val = pdf_dict_get_val(ctx, charprocs, i);
-			fz_buffer *buffer = fz_new_buffer(ctx, 1024);
-			fz_try(ctx)
-			{
-				proc_buffer = pdf_new_buffer_processor(ctx, buffer, filter->ascii);
-				if (filter->sanitize)
-				{
-					proc_filter = pdf_new_filter_processor(ctx, doc, proc_buffer, in_res, out_res, -1, fz_identity, filter);
-					pdf_process_contents(ctx, proc_filter, doc, in_res, val, NULL);
-					pdf_close_processor(ctx, proc_filter);
-				}
-				else
-				{
-					pdf_process_contents(ctx, proc_buffer, doc, in_res, val, NULL);
-				}
-				pdf_close_processor(ctx, proc_buffer);
 
-				pdf_update_stream(ctx, doc, val, buffer, 0);
-			}
-			fz_always(ctx)
+			fz_clear_buffer(ctx, buffer);
+			pdf_process_raw_contents(ctx, top, doc, in_res, val, NULL);
+
+			pdf_close_processor(ctx, proc_buffer);
+
+			if (!options->no_update)
 			{
-				pdf_drop_processor(ctx, proc_filter);
-				pdf_drop_processor(ctx, proc_buffer);
-				fz_drop_buffer(ctx, buffer);
-			}
-			fz_catch(ctx)
-			{
-				fz_rethrow(ctx);
+				new_buf = fz_clone_buffer(ctx, buffer);
+				pdf_update_stream(ctx, doc, val, new_buf, 0);
+				fz_drop_buffer(ctx, new_buf);
+				new_buf = NULL;
 			}
 		}
 
-		pdf_filter_resources(ctx, doc, in_res, out_res, filter, &cycle);
-
-		if (filter->sanitize)
-			pdf_dict_put(ctx, obj, PDF_NAME(Resources), out_res);
 	}
 	fz_always(ctx)
 	{
-		pdf_drop_obj(ctx, out_res);
+		res = pdf_processor_pop_resources(ctx, top);
+		for (i = 0; i < num_filters; i++)
+			pdf_drop_processor(ctx, list[i]);
+		pdf_drop_processor(ctx, proc_buffer);
+		fz_free(ctx, list);
+		fz_drop_buffer(ctx, new_buf);
+		fz_drop_buffer(ctx, buffer);
 	}
 	fz_catch(ctx)
 	{
+		pdf_drop_obj(ctx, res);
 		fz_rethrow(ctx);
 	}
+	pdf_dict_put_drop(ctx, obj, PDF_NAME(Resources), res);
 }
 
 static void
-pdf_filter_xobject(fz_context *ctx, pdf_document *doc, pdf_obj *stm, pdf_obj *page_res, pdf_filter_options *filter, pdf_cycle_list *cycle_up)
+pdf_filter_xobject(fz_context *ctx, pdf_document *doc, pdf_obj *stm, pdf_obj *page_res, pdf_filter_options *options, pdf_cycle_list *cycle_up)
 {
 	pdf_cycle_list cycle;
 	pdf_obj *struct_parents_obj;
@@ -304,9 +317,12 @@ pdf_filter_xobject(fz_context *ctx, pdf_document *doc, pdf_obj *stm, pdf_obj *pa
 		return;
 	fz_try(ctx)
 	{
-		pdf_filter_content_stream(ctx, doc, stm, old_res, fz_identity, filter, struct_parents, &new_buf, &new_res, &cycle);
-		pdf_update_stream(ctx, doc, stm, new_buf, 0);
-		pdf_dict_put(ctx, stm, PDF_NAME(Resources), new_res);
+		pdf_filter_content_stream(ctx, doc, stm, old_res, fz_identity, options, struct_parents, &new_buf, &new_res, &cycle);
+		if (!options->no_update)
+		{
+			pdf_update_stream(ctx, doc, stm, new_buf, 0);
+			pdf_dict_put(ctx, stm, PDF_NAME(Resources), new_res);
+		}
 	}
 	fz_always(ctx)
 	{
@@ -318,7 +334,7 @@ pdf_filter_xobject(fz_context *ctx, pdf_document *doc, pdf_obj *stm, pdf_obj *pa
 }
 
 pdf_obj *
-pdf_filter_xobject_instance(fz_context *ctx, pdf_obj *old_xobj, pdf_obj *page_res, fz_matrix transform, pdf_filter_options *filter, pdf_cycle_list *cycle_up)
+pdf_filter_xobject_instance(fz_context *ctx, pdf_obj *old_xobj, pdf_obj *page_res, fz_matrix transform, pdf_filter_options *options, pdf_cycle_list *cycle_up)
 {
 	pdf_cycle_list cycle;
 	pdf_document *doc = pdf_get_bound_document(ctx, old_xobj);
@@ -354,9 +370,12 @@ pdf_filter_xobject_instance(fz_context *ctx, pdf_obj *old_xobj, pdf_obj *page_re
 	fz_try(ctx)
 	{
 		new_xobj = pdf_add_object_drop(ctx, doc, pdf_copy_dict(ctx, old_xobj));
-		pdf_filter_content_stream(ctx, doc, old_xobj, old_res, transform, filter, struct_parents, &new_buf, &new_res, &cycle);
-		pdf_update_stream(ctx, doc, new_xobj, new_buf, 0);
-		pdf_dict_put(ctx, new_xobj, PDF_NAME(Resources), new_res);
+		pdf_filter_content_stream(ctx, doc, old_xobj, old_res, transform, options, struct_parents, &new_buf, &new_res, &cycle);
+		if (!options->no_update)
+		{
+			pdf_update_stream(ctx, doc, new_xobj, new_buf, 0);
+			pdf_dict_put(ctx, new_xobj, PDF_NAME(Resources), new_res);
+		}
 	}
 	fz_always(ctx)
 	{
@@ -372,7 +391,7 @@ pdf_filter_xobject_instance(fz_context *ctx, pdf_obj *old_xobj, pdf_obj *page_re
 	return new_xobj;
 }
 
-void pdf_filter_page_contents(fz_context *ctx, pdf_document *doc, pdf_page *page, pdf_filter_options *filter)
+void pdf_filter_page_contents(fz_context *ctx, pdf_document *doc, pdf_page *page, pdf_filter_options *options)
 {
 	pdf_obj *contents, *old_res;
 	pdf_obj *struct_parents_obj;
@@ -388,21 +407,24 @@ void pdf_filter_page_contents(fz_context *ctx, pdf_document *doc, pdf_page *page
 	contents = pdf_page_contents(ctx, page);
 	old_res = pdf_page_resources(ctx, page);
 
-	pdf_filter_content_stream(ctx, doc, contents, old_res, fz_identity, filter, struct_parents, &buffer, &new_res, NULL);
+	pdf_filter_content_stream(ctx, doc, contents, old_res, fz_identity, options, struct_parents, &buffer, &new_res, NULL);
 
 	fz_try(ctx)
 	{
-		if (filter->end_page)
-			filter->end_page(ctx, buffer, filter->opaque);
-		/* If contents is not a stream it's an array of streams or missing. */
-		if (!pdf_is_stream(ctx, contents))
+		if (options->complete)
+			options->complete(ctx, buffer, options->opaque);
+		if (!options->no_update)
 		{
-			/* Create a new stream object to replace the array of streams or missing object. */
-			contents = pdf_add_object_drop(ctx, doc, pdf_new_dict(ctx, doc, 1));
-			pdf_dict_put_drop(ctx, page->obj, PDF_NAME(Contents), contents);
+			/* If contents is not a stream it's an array of streams or missing. */
+			if (!pdf_is_stream(ctx, contents))
+			{
+				/* Create a new stream object to replace the array of streams or missing object. */
+				contents = pdf_add_object_drop(ctx, doc, pdf_new_dict(ctx, doc, 1));
+				pdf_dict_put_drop(ctx, page->obj, PDF_NAME(Contents), contents);
+			}
+			pdf_update_stream(ctx, doc, contents, buffer, 0);
+			pdf_dict_put(ctx, page->obj, PDF_NAME(Resources), new_res);
 		}
-		pdf_update_stream(ctx, doc, contents, buffer, 0);
-		pdf_dict_put(ctx, page->obj, PDF_NAME(Resources), new_res);
 	}
 	fz_always(ctx)
 	{
@@ -413,7 +435,7 @@ void pdf_filter_page_contents(fz_context *ctx, pdf_document *doc, pdf_page *page
 		fz_rethrow(ctx);
 }
 
-void pdf_filter_annot_contents(fz_context *ctx, pdf_document *doc, pdf_annot *annot, pdf_filter_options *filter)
+void pdf_filter_annot_contents(fz_context *ctx, pdf_document *doc, pdf_annot *annot, pdf_filter_options *options)
 {
 	pdf_obj *ap = pdf_dict_get(ctx, annot->obj, PDF_NAME(AP));
 	if (pdf_is_dict(ctx, ap))
@@ -424,16 +446,27 @@ void pdf_filter_annot_contents(fz_context *ctx, pdf_document *doc, pdf_annot *an
 			pdf_obj *stm = pdf_dict_get_val(ctx, ap, i);
 			if (pdf_is_stream(ctx, stm))
 			{
-				pdf_filter_xobject(ctx, doc, stm, NULL, filter, NULL);
+				pdf_filter_xobject(ctx, doc, stm, NULL, options, NULL);
 			}
 		}
 	}
 }
 
+/* REDACTIONS */
+
+struct redact_filter_state {
+	pdf_filter_options filter_opts;
+	pdf_sanitize_filter_options sanitize_opts;
+	pdf_filter_factory filter_list[2];
+	pdf_page *page;
+	pdf_annot *target; // NULL if all
+};
+
 static void
 pdf_redact_end_page(fz_context *ctx, fz_buffer *buf, void *opaque)
 {
-	pdf_page *page = opaque;
+	struct redact_filter_state *red = opaque;
+	pdf_page *page = red->page;
 	pdf_annot *annot;
 	pdf_obj *qp;
 	int i, n;
@@ -442,6 +475,8 @@ pdf_redact_end_page(fz_context *ctx, fz_buffer *buf, void *opaque)
 
 	for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
 	{
+		if (red->target != NULL && red->target != annot)
+			continue;
 		if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
 		{
 			qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
@@ -474,7 +509,8 @@ pdf_redact_end_page(fz_context *ctx, fz_buffer *buf, void *opaque)
 static int
 pdf_redact_text_filter(fz_context *ctx, void *opaque, int *ucsbuf, int ucslen, fz_matrix trm, fz_matrix ctm, fz_rect bbox)
 {
-	pdf_page *page = opaque;
+	struct redact_filter_state *red = opaque;
+	pdf_page *page = red->page;
 	pdf_annot *annot;
 	pdf_obj *qp;
 	fz_rect r;
@@ -495,6 +531,8 @@ pdf_redact_text_filter(fz_context *ctx, void *opaque, int *ucsbuf, int ucslen, f
 
 	for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
 	{
+		if (red->target != NULL && red->target != annot)
+			continue;
 		if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
 		{
 			qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
@@ -570,28 +608,36 @@ pdf_redact_image_imp(fz_context *ctx, fz_matrix ctm, fz_image *image, fz_pixmap 
 		}
 	}
 
-	n = pixmap->n - pixmap->alpha;
-	bpp = pixmap->n;
-	if (fz_colorspace_is_subtractive(ctx, pixmap->colorspace))
-		white = 0;
-	else
-		white = 255;
-
-	inv_ctm = fz_post_scale(fz_invert_matrix(ctm), pixmap->w, pixmap->h);
-	r = fz_round_rect(fz_transform_rect(fz_rect_from_quad(q), inv_ctm));
-	r.x0 = fz_clampi(r.x0, 0, pixmap->w);
-	r.x1 = fz_clampi(r.x1, 0, pixmap->w);
-	r.y1 = fz_clampi(pixmap->h - r.y1, 0, pixmap->h);
-	r.y0 = fz_clampi(pixmap->h - r.y0, 0, pixmap->h);
-	for (y = r.y1; y < r.y0; ++y)
+	/* If we have a 1x1 image, to which a mask is being applied
+	 * then it's the mask we really want to change, not the
+	 * image. We might have just a small section of the image
+	 * being covered, and setting the whole thing to white
+	 * will blank stuff outside the desired area. */
+	if (!mask || pixmap->w > 1 || pixmap->h > 1)
 	{
-		for (x = r.x0; x < r.x1; ++x)
+		n = pixmap->n - pixmap->alpha;
+		bpp = pixmap->n;
+		if (fz_colorspace_is_subtractive(ctx, pixmap->colorspace))
+			white = 0;
+		else
+			white = 255;
+
+		inv_ctm = fz_post_scale(fz_invert_matrix(ctm), pixmap->w, pixmap->h);
+		r = fz_round_rect(fz_transform_rect(fz_rect_from_quad(q), inv_ctm));
+		r.x0 = fz_clampi(r.x0, 0, pixmap->w);
+		r.x1 = fz_clampi(r.x1, 0, pixmap->w);
+		r.y1 = fz_clampi(pixmap->h - r.y1, 0, pixmap->h);
+		r.y0 = fz_clampi(pixmap->h - r.y0, 0, pixmap->h);
+		for (y = r.y1; y < r.y0; ++y)
 		{
-			unsigned char *s = &pixmap->samples[(size_t)y * pixmap->stride + (size_t)x * bpp];
-			for (k = 0; k < n; ++k)
-				s[k] = white;
-			if (pixmap->alpha)
-				s[k] = 255;
+			for (x = r.x0; x < r.x1; ++x)
+			{
+				unsigned char *s = &pixmap->samples[(size_t)y * pixmap->stride + (size_t)x * bpp];
+				for (k = 0; k < n; ++k)
+					s[k] = white;
+				if (pixmap->alpha)
+					s[k] = 255;
+			}
 		}
 	}
 
@@ -617,7 +663,8 @@ static fz_image *
 pdf_redact_image_filter_remove(fz_context *ctx, void *opaque, fz_matrix ctm, const char *name, fz_image *image)
 {
 	fz_pixmap *redacted = NULL;
-	pdf_page *page = opaque;
+	struct redact_filter_state *red = opaque;
+	pdf_page *page = red->page;
 	pdf_annot *annot;
 	pdf_obj *qp;
 	fz_rect area;
@@ -630,6 +677,8 @@ pdf_redact_image_filter_remove(fz_context *ctx, void *opaque, fz_matrix ctm, con
 
 	for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
 	{
+		if (red->target != NULL && red->target != annot)
+			continue;
 		if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
 		{
 			qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
@@ -662,7 +711,8 @@ pdf_redact_image_filter_pixels(fz_context *ctx, void *opaque, fz_matrix ctm, con
 {
 	fz_pixmap *redacted = NULL;
 	fz_pixmap *mask = NULL;
-	pdf_page *page = opaque;
+	struct redact_filter_state *red = opaque;
+	pdf_page *page = red->page;
 	pdf_annot *annot;
 	pdf_obj *qp;
 	fz_quad area, q;
@@ -677,6 +727,8 @@ pdf_redact_image_filter_pixels(fz_context *ctx, void *opaque, fz_matrix ctm, con
 	/* First see if we can redact the image completely */
 	for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
 	{
+		if (red->target != NULL && red->target != annot)
+			continue;
 		if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
 		{
 			qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
@@ -705,6 +757,8 @@ pdf_redact_image_filter_pixels(fz_context *ctx, void *opaque, fz_matrix ctm, con
 	{
 		for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
 		{
+			if (red->target != NULL && red->target != annot)
+				continue;
 			if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
 			{
 				qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
@@ -769,7 +823,7 @@ pdf_redact_image_filter_pixels(fz_context *ctx, void *opaque, fz_matrix ctm, con
 }
 
 static int
-rect_touches_redactions(fz_context *ctx, pdf_document *doc, pdf_page *page, fz_rect area)
+rect_touches_redactions(fz_context *ctx, pdf_document *doc, pdf_page *page, fz_rect area, struct redact_filter_state *red)
 {
 	pdf_annot *annot;
 	pdf_obj *qp;
@@ -779,6 +833,8 @@ rect_touches_redactions(fz_context *ctx, pdf_document *doc, pdf_page *page, fz_r
 
 	for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
 	{
+		if (red->target != NULL && red->target != annot)
+			continue;
 		if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
 		{
 			qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
@@ -807,7 +863,7 @@ rect_touches_redactions(fz_context *ctx, pdf_document *doc, pdf_page *page, fz_r
 }
 
 static void
-pdf_redact_page_links(fz_context *ctx, pdf_document *doc, pdf_page *page)
+pdf_redact_page_links(fz_context *ctx, pdf_document *doc, pdf_page *page, struct redact_filter_state *red)
 {
 	pdf_obj *annots;
 	pdf_obj *link;
@@ -822,7 +878,7 @@ pdf_redact_page_links(fz_context *ctx, pdf_document *doc, pdf_page *page)
 		if (pdf_dict_get(ctx, link, PDF_NAME(Subtype)) == PDF_NAME(Link))
 		{
 			area = pdf_dict_get_rect(ctx, link, PDF_NAME(Rect));
-			if (rect_touches_redactions(ctx, doc, page, area))
+			if (rect_touches_redactions(ctx, doc, page, area, red))
 			{
 				pdf_array_delete(ctx, annots, k);
 				continue;
@@ -833,7 +889,7 @@ pdf_redact_page_links(fz_context *ctx, pdf_document *doc, pdf_page *page)
 }
 
 static void
-pdf_redact_page_annotations(fz_context *ctx, pdf_document *doc, pdf_page *page)
+pdf_redact_page_annotations(fz_context *ctx, pdf_document *doc, pdf_page *page, struct redact_filter_state *red)
 {
 	pdf_annot *annot;
 	fz_rect area;
@@ -844,7 +900,7 @@ restart:
 		if (pdf_annot_type(ctx, annot) == PDF_ANNOT_FREE_TEXT)
 		{
 			area = pdf_dict_get_rect(ctx, pdf_annot_obj(ctx, annot), PDF_NAME(Rect));
-			if (rect_touches_redactions(ctx, doc, page, area))
+			if (rect_touches_redactions(ctx, doc, page, area, red))
 			{
 				pdf_delete_annot(ctx, page, annot);
 				goto restart;
@@ -853,70 +909,103 @@ restart:
 	}
 }
 
-int
-pdf_redact_page(fz_context *ctx, pdf_document *doc, pdf_page *page, pdf_redact_options *opts)
+static
+void init_redact_filter(fz_context *ctx, pdf_redact_options *redact_opts, struct redact_filter_state *red, pdf_page *page, pdf_annot *target)
+{
+	int black_boxes = redact_opts ? redact_opts->black_boxes : 0;
+	int image_method = redact_opts ? redact_opts->image_method : PDF_REDACT_IMAGE_PIXELS;
+
+	memset(&red->filter_opts, 0, sizeof red->filter_opts);
+	memset(&red->sanitize_opts, 0, sizeof red->sanitize_opts);
+
+	red->filter_opts.recurse = 0; /* don't redact patterns, softmasks, and type3 fonts */
+	red->filter_opts.instance_forms = 1; /* redact xobjects with instancing */
+	red->filter_opts.ascii = 1;
+	red->filter_opts.opaque = red;
+	red->filter_opts.filters = red->filter_list;
+	if (black_boxes)
+		red->filter_opts.complete = pdf_redact_end_page;
+
+	red->sanitize_opts.opaque = red;
+	red->sanitize_opts.text_filter = pdf_redact_text_filter;
+	if (image_method == PDF_REDACT_IMAGE_PIXELS)
+		red->sanitize_opts.image_filter = pdf_redact_image_filter_pixels;
+	if (image_method == PDF_REDACT_IMAGE_REMOVE)
+		red->sanitize_opts.image_filter = pdf_redact_image_filter_remove;
+
+	red->filter_list[0].filter = pdf_new_sanitize_filter;
+	red->filter_list[0].options = &red->sanitize_opts;
+	red->filter_list[1].filter = NULL;
+	red->filter_list[1].options = NULL;
+
+	red->page = page;
+	red->target = NULL;
+}
+
+static int
+pdf_apply_redaction_imp(fz_context *ctx, pdf_document *doc, pdf_page *page, pdf_annot *target, pdf_redact_options *redact_opts)
 {
 	pdf_annot *annot;
 	int has_redactions = 0;
-	int black_boxes = 0;
-	int image_method = PDF_REDACT_IMAGE_PIXELS;
+	struct redact_filter_state red;
 
-	pdf_filter_options filter;
-
-	if (opts)
-	{
-		black_boxes = opts->black_boxes;
-		image_method = opts->image_method;
-	}
-
-	memset(&filter, 0, sizeof filter);
-	filter.opaque = page;
-	filter.text_filter = pdf_redact_text_filter;
-	if (image_method == PDF_REDACT_IMAGE_PIXELS)
-		filter.image_filter = pdf_redact_image_filter_pixels;
-	if (image_method == PDF_REDACT_IMAGE_REMOVE)
-		filter.image_filter = pdf_redact_image_filter_remove;
-	if (black_boxes)
-		filter.end_page = pdf_redact_end_page;
-	filter.recurse = 0; /* don't redact patterns, softmasks, and type3 fonts */
-	filter.instance_forms = 1; /* redact xobjects with instancing */
-	filter.sanitize = 1;
-	filter.ascii = 1;
-
-	for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
+	for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot)) {
+		if (target != NULL && target != annot)
+			continue;
 		if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
 			has_redactions = 1;
+	}
 
 	if (!has_redactions)
 		return 0;
 
-	pdf_begin_operation(ctx, doc, "Redact page");
+	init_redact_filter(ctx, redact_opts, &red, page, target);
+
+	if (target)
+		pdf_begin_operation(ctx, doc, "Apply redaction");
+	else
+		pdf_begin_operation(ctx, doc, "Apply redactions on page");
 	fz_try(ctx)
 	{
-		pdf_filter_page_contents(ctx, doc, page, &filter);
-		pdf_redact_page_links(ctx, doc, page);
-		pdf_redact_page_annotations(ctx, doc, page);
+		pdf_filter_page_contents(ctx, doc, page, &red.filter_opts);
+		pdf_redact_page_links(ctx, doc, page, &red);
+		pdf_redact_page_annotations(ctx, doc, page, &red);
 
 		annot = pdf_first_annot(ctx, page);
 		while (annot)
 		{
-			if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
+			if (target == NULL || annot == target)
 			{
-				pdf_delete_annot(ctx, page, annot);
-				annot = pdf_first_annot(ctx, page);
+				if (pdf_dict_get(ctx, annot->obj, PDF_NAME(Subtype)) == PDF_NAME(Redact))
+				{
+					pdf_delete_annot(ctx, page, annot);
+					annot = pdf_first_annot(ctx, page);
+					continue;
+				}
 			}
-			else
-			{
-				annot = pdf_next_annot(ctx, annot);
-			}
+			annot = pdf_next_annot(ctx, annot);
 		}
 
 		doc->redacted = 1;
-	}
-	fz_always(ctx)
 		pdf_end_operation(ctx, doc);
+	}
 	fz_catch(ctx)
+	{
+		pdf_abandon_operation(ctx, doc);
 		fz_rethrow(ctx);
+	}
 
 	return 1;
+}
+
+int
+pdf_redact_page(fz_context *ctx, pdf_document *doc, pdf_page *page, pdf_redact_options *redact_opts)
+{
+	return pdf_apply_redaction_imp(ctx, doc, page, NULL, redact_opts);
+}
+
+int
+pdf_apply_redaction(fz_context *ctx, pdf_annot *annot, pdf_redact_options *redact_opts)
+{
+	return pdf_apply_redaction_imp(ctx, annot->page->doc, annot->page, annot, redact_opts);
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2022 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #ifndef MUPDF_FITZ_ARCHIVE_H
 #define MUPDF_FITZ_ARCHIVE_H
@@ -27,6 +27,7 @@
 #include "mupdf/fitz/context.h"
 #include "mupdf/fitz/buffer.h"
 #include "mupdf/fitz/stream.h"
+#include "mupdf/fitz/tree.h"
 
 /* PUBLIC API */
 
@@ -62,6 +63,15 @@ fz_archive *fz_open_archive(fz_context *ctx, const char *filename);
 fz_archive *fz_open_archive_with_stream(fz_context *ctx, fz_stream *file);
 
 /**
+	Open zip or tar archive stream.
+
+	Does the same as fz_open_archive_with_stream, but will not throw
+	an error in the event of failing to recognise the format. Will
+	still throw errors in other cases though!
+*/
+fz_archive *fz_try_open_archive_with_stream(fz_context *ctx, fz_stream *file);
+
+/**
 	Open a directory as if it was an archive.
 
 	A special case where a directory is opened as if it was an
@@ -82,12 +92,18 @@ fz_archive *fz_open_directory(fz_context *ctx, const char *path);
 int fz_is_directory(fz_context *ctx, const char *path);
 
 /**
-	Drop the reference to an archive.
+	Drop a reference to an archive.
 
-	Closes and releases any memory or filehandles associated
-	with the archive.
+	When the last reference is dropped, this closes and releases
+	any memory or filehandles associated with the archive.
 */
 void fz_drop_archive(fz_context *ctx, fz_archive *arch);
+
+/**
+	Keep a reference to an archive.
+*/
+fz_archive *
+fz_keep_archive(fz_context *ctx, fz_archive *arch);
 
 /**
 	Return a pointer to a string describing the format of the
@@ -137,8 +153,18 @@ int fz_has_archive_entry(fz_context *ctx, fz_archive *arch, const char *name);
 
 	name: Entry name to look for, this must be an exact match to
 	the entry name in the archive.
+
+	Throws an exception if a matching entry cannot be found.
 */
 fz_stream *fz_open_archive_entry(fz_context *ctx, fz_archive *arch, const char *name);
+
+/**
+	Opens an archive entry as a stream.
+
+	Returns NULL if a matching entry cannot be found, otherwise
+	behaves exactly as fz_open_archive_entry.
+*/
+fz_stream *fz_try_open_archive_entry(fz_context *ctx, fz_archive *arch, const char *name);
 
 /**
 	Reads all bytes in an archive entry
@@ -146,8 +172,22 @@ fz_stream *fz_open_archive_entry(fz_context *ctx, fz_archive *arch, const char *
 
 	name: Entry name to look for, this must be an exact match to
 	the entry name in the archive.
+
+	Throws an exception if a matching entry cannot be found.
 */
 fz_buffer *fz_read_archive_entry(fz_context *ctx, fz_archive *arch, const char *name);
+
+/**
+	Reads all bytes in an archive entry
+	into a buffer.
+
+	name: Entry name to look for, this must be an exact match to
+	the entry name in the archive.
+
+	Returns NULL if a matching entry cannot be found. Otherwise behaves
+	the same as fz_read_archive_entry. Exceptions may be thrown.
+*/
+fz_buffer *fz_try_read_archive_entry(fz_context *ctx, fz_archive *arch, const char *name);
 
 /**
 	fz_archive: tar implementation
@@ -266,11 +306,52 @@ void fz_close_zip_writer(fz_context *ctx, fz_zip_writer *zip);
 void fz_drop_zip_writer(fz_context *ctx, fz_zip_writer *zip);
 
 /**
+	Create an archive that holds named buffers.
+
+	tree can either be a preformed tree with fz_buffers as values,
+	or it can be NULL for an empty tree.
+*/
+fz_archive *fz_new_tree_archive(fz_context *ctx, fz_tree *tree);
+
+/**
+	Add a named buffer to an existing tree archive.
+
+	The tree will take a new reference to the buffer. Ownership
+	is not transferred.
+*/
+void fz_tree_archive_add_buffer(fz_context *ctx, fz_archive *arch_, const char *name, fz_buffer *buf);
+
+/**
+	Add a named block of data to an existing tree archive.
+
+	The data will be copied into a buffer, and so the caller
+	may free it as soon as this returns.
+*/
+void fz_tree_archive_add_data(fz_context *ctx, fz_archive *arch_, const char *name, const void *data, size_t size);
+
+/**
+	Create a new multi archive (initially empty).
+*/
+fz_archive *fz_new_multi_archive(fz_context *ctx);
+
+/**
+	Add an archive to the set of archives handled by a multi
+	archive.
+
+	If path is NULL, then the archive contents will appear at the
+	top level, otherwise, the archives contents will appear prefixed
+	by path.
+*/
+void fz_mount_multi_archive(fz_context *ctx, fz_archive *arch_, fz_archive *sub, const char *path);
+
+/**
 	Implementation details: Subject to change.
 */
 
 struct fz_archive
 {
+	int refs;
+
 	fz_stream *file;
 	const char *format;
 

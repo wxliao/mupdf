@@ -17,13 +17,16 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
-
-#include "glyphbox.h"
-#include "extract.h"
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
+
+#if FZ_ENABLE_DOCX_OUTPUT
+
+#include "glyphbox.h"
+#include "extract/extract.h"
+#include "extract/buffer.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -72,35 +75,41 @@ static void dev_text(fz_context *ctx, fz_device *dev_, const fz_text *text, fz_m
 		for (span = text->head; span; span = span->next)
 		{
 			int i;
+			fz_matrix combined, trm;
+			fz_rect bbox;
 
+			combined = fz_concat(span->trm, ctm);
+
+			bbox = span->font->bbox;
 			if (extract_span_begin(
 					dev->writer->extract,
 					span->font->name,
 					span->font->flags.is_bold,
 					span->font->flags.is_italic,
 					span->wmode,
-					ctm.a,
-					ctm.b,
-					ctm.c,
-					ctm.d,
-					ctm.e,
-					ctm.f,
-					span->trm.a,
-					span->trm.b,
-					span->trm.c,
-					span->trm.d,
-					span->trm.e,
-					span->trm.f
-					))
+					combined.a,
+					combined.b,
+					combined.c,
+					combined.d,
+					bbox.x0,
+					bbox.y0,
+					bbox.x1,
+					bbox.y1))
 			{
 				fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to begin span");
 			}
 
+			trm = span->trm;
 			for (i=0; i<span->len; ++i)
 			{
 				fz_text_item *item = &span->items[i];
 				float adv = 0;
 				fz_rect bounds;
+				fz_matrix combined;
+
+				trm.e = item->x;
+				trm.f = item->y;
+				combined = fz_concat(trm, ctm);
 
 				if (dev->writer->mediabox_clip)
 					if (fz_glyph_entirely_outside_box(ctx, &ctm, span, item, &dev->writer->mediabox))
@@ -109,10 +118,8 @@ static void dev_text(fz_context *ctx, fz_device *dev_, const fz_text *text, fz_m
 				if (span->items[i].gid >= 0)
 					adv = fz_advance_glyph(ctx, span->font, span->items[i].gid, span->wmode);
 
-				bounds = fz_bound_glyph(ctx, span->font, span->items[i].gid, span->trm);
-				bounds = fz_translate_rect(bounds, item->x, item->y);
-				bounds = fz_transform_rect(bounds, ctm);
-				if (extract_add_char(dev->writer->extract, item->x, item->y, item->ucs, adv, 0 /*autosplit*/,
+				bounds = fz_bound_glyph(ctx, span->font, span->items[i].gid, combined);
+				if (extract_add_char(dev->writer->extract, combined.e, combined.f, item->ucs, adv,
 							bounds.x0, bounds.y0, bounds.x1, bounds.y1))
 					fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to add char");
 			}
@@ -373,6 +380,191 @@ dev_stroke_path(fz_context *ctx, fz_device *dev_, const fz_path *path,
 	}
 }
 
+static extract_struct_t
+fz_struct_to_extract(fz_structure type)
+{
+	switch (type)
+	{
+	default:
+		return extract_struct_INVALID;
+
+	case FZ_STRUCTURE_DOCUMENT:
+		return extract_struct_DOCUMENT;
+	case FZ_STRUCTURE_PART:
+		return extract_struct_PART;
+	case FZ_STRUCTURE_ART:
+		return extract_struct_ART;
+	case FZ_STRUCTURE_SECT:
+		return extract_struct_SECT;
+	case FZ_STRUCTURE_DIV:
+		return extract_struct_DIV;
+	case FZ_STRUCTURE_BLOCKQUOTE:
+		return extract_struct_BLOCKQUOTE;
+	case FZ_STRUCTURE_CAPTION:
+		return extract_struct_CAPTION;
+	case FZ_STRUCTURE_TOC:
+		return extract_struct_TOC;
+	case FZ_STRUCTURE_TOCI:
+		return extract_struct_TOCI;
+	case FZ_STRUCTURE_INDEX:
+		return extract_struct_INDEX;
+	case FZ_STRUCTURE_NONSTRUCT:
+		return extract_struct_NONSTRUCT;
+	case FZ_STRUCTURE_PRIVATE:
+		return extract_struct_PRIVATE;
+	/* Grouping elements (PDF 2.0 - Table 364) */
+	case FZ_STRUCTURE_DOCUMENTFRAGMENT:
+		return extract_struct_DOCUMENTFRAGMENT;
+	/* Grouping elements (PDF 2.0 - Table 365) */
+	case FZ_STRUCTURE_ASIDE:
+		return extract_struct_ASIDE;
+	/* Grouping elements (PDF 2.0 - Table 366) */
+	case FZ_STRUCTURE_TITLE:
+		return extract_struct_TITLE;
+	case FZ_STRUCTURE_FENOTE:
+		return extract_struct_FENOTE;
+	/* Grouping elements (PDF 2.0 - Table 367) */
+	case FZ_STRUCTURE_SUB:
+		return extract_struct_SUB;
+
+	/* Paragraphlike elements (PDF 1.7 - Table 10.21) */
+	case FZ_STRUCTURE_P:
+		return extract_struct_P;
+	case FZ_STRUCTURE_H:
+		return extract_struct_H;
+	case FZ_STRUCTURE_H1:
+		return extract_struct_H1;
+	case FZ_STRUCTURE_H2:
+		return extract_struct_H2;
+	case FZ_STRUCTURE_H3:
+		return extract_struct_H3;
+	case FZ_STRUCTURE_H4:
+		return extract_struct_H4;
+	case FZ_STRUCTURE_H5:
+		return extract_struct_H5;
+	case FZ_STRUCTURE_H6:
+		return extract_struct_H6;
+
+	/* List elements (PDF 1.7 - Table 10.23) */
+	case FZ_STRUCTURE_LIST:
+		return extract_struct_LIST;
+	case FZ_STRUCTURE_LISTITEM:
+		return extract_struct_LISTITEM;
+	case FZ_STRUCTURE_LABEL:
+		return extract_struct_LABEL;
+	case FZ_STRUCTURE_LISTBODY:
+		return extract_struct_LISTBODY;
+
+	/* Table elements (PDF 1.7 - Table 10.24) */
+	case FZ_STRUCTURE_TABLE:
+		return extract_struct_TABLE;
+	case FZ_STRUCTURE_TR:
+		return extract_struct_TR;
+	case FZ_STRUCTURE_TH:
+		return extract_struct_TH;
+	case FZ_STRUCTURE_TD:
+		return extract_struct_TD;
+	case FZ_STRUCTURE_THEAD:
+		return extract_struct_THEAD;
+	case FZ_STRUCTURE_TBODY:
+		return extract_struct_TBODY;
+	case FZ_STRUCTURE_TFOOT:
+		return extract_struct_TFOOT;
+
+	/* Inline elements (PDF 1.7 - Table 10.25) */
+	case FZ_STRUCTURE_SPAN:
+		return extract_struct_SPAN;
+	case FZ_STRUCTURE_QUOTE:
+		return extract_struct_QUOTE;
+	case FZ_STRUCTURE_NOTE:
+		return extract_struct_NOTE;
+	case FZ_STRUCTURE_REFERENCE:
+		return extract_struct_REFERENCE;
+	case FZ_STRUCTURE_BIBENTRY:
+		return extract_struct_BIBENTRY;
+	case FZ_STRUCTURE_CODE:
+		return extract_struct_CODE;
+	case FZ_STRUCTURE_LINK:
+		return extract_struct_LINK;
+	case FZ_STRUCTURE_ANNOT:
+		return extract_struct_ANNOT;
+	/* Inline elements (PDF 2.0 - Table 368) */
+	case FZ_STRUCTURE_EM:
+		return extract_struct_EM;
+	case FZ_STRUCTURE_STRONG:
+		return extract_struct_STRONG;
+
+	/* Ruby inline element (PDF 1.7 - Table 10.26) */
+	case FZ_STRUCTURE_RUBY:
+		return extract_struct_RUBY;
+	case FZ_STRUCTURE_RB:
+		return extract_struct_RB;
+	case FZ_STRUCTURE_RT:
+		return extract_struct_RT;
+	case FZ_STRUCTURE_RP:
+		return extract_struct_RP;
+
+	/* Warichu inline element (PDF 1.7 - Table 10.26) */
+	case FZ_STRUCTURE_WARICHU:
+		return extract_struct_WARICHU;
+	case FZ_STRUCTURE_WT:
+		return extract_struct_WT;
+	case FZ_STRUCTURE_WP:
+		return extract_struct_WP;
+
+	/* Illustration elements (PDF 1.7 - Table 10.27) */
+	case FZ_STRUCTURE_FIGURE:
+		return extract_struct_FIGURE;
+	case FZ_STRUCTURE_FORMULA:
+		return extract_struct_FORMULA;
+	case FZ_STRUCTURE_FORM:
+		return extract_struct_FORM;
+
+	/* Artifact structure type (PDF 2.0 - Table 375) */
+	case FZ_STRUCTURE_ARTIFACT:
+		return extract_struct_ARTIFACT;
+	}
+}
+
+static void
+dev_begin_structure(fz_context *ctx, fz_device *dev_, fz_structure standard, const char *raw, int uid)
+{
+	fz_docx_device *dev = (fz_docx_device *)dev_;
+	extract_t *extract = dev->writer->extract;
+
+	assert(!dev->writer->ctx);
+	dev->writer->ctx = ctx;
+	fz_try(ctx)
+	{
+		if (extract_begin_struct(extract, fz_struct_to_extract(standard), uid, -1))
+			fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to begin struct");
+	}
+	fz_always(ctx)
+		dev->writer->ctx = NULL;
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+static void
+dev_end_structure(fz_context *ctx, fz_device *dev_)
+{
+	fz_docx_device *dev = (fz_docx_device *)dev_;
+	extract_t *extract = dev->writer->extract;
+
+	assert(!dev->writer->ctx);
+	dev->writer->ctx = ctx;
+	fz_try(ctx)
+	{
+		if (extract_end_struct(extract))
+			fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to end struct");
+	}
+	fz_always(ctx)
+		dev->writer->ctx = NULL;
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+
 static fz_device *writer_begin_page(fz_context *ctx, fz_document_writer *writer_, fz_rect mediabox)
 {
 	fz_docx_writer *writer = (fz_docx_writer*) writer_;
@@ -394,6 +586,8 @@ static fz_device *writer_begin_page(fz_context *ctx, fz_document_writer *writer_
 		dev->super.fill_image = dev_fill_image;
 		dev->super.fill_path = dev_fill_path;
 		dev->super.stroke_path = dev_stroke_path;
+		dev->super.begin_structure = dev_begin_structure;
+		dev->super.end_structure = dev_end_structure;
 		dev->writer = writer;
 	}
 	fz_always(ctx)
@@ -572,6 +766,7 @@ static fz_document_writer *fz_new_docx_writer_internal(fz_context *ctx, fz_outpu
 		writer->output = out;
 		if (get_bool_option(ctx, options, "html", 0)) format = extract_format_HTML;
 		if (get_bool_option(ctx, options, "text", 0)) format = extract_format_TEXT;
+		if (get_bool_option(ctx, options, "json", 0)) format = extract_format_JSON;
 		if (extract_alloc_create(s_realloc_fn, writer, &writer->alloc))
 			fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to create extract_alloc instance");
 		if (extract_begin(writer->alloc, format, &writer->extract))
@@ -617,14 +812,24 @@ static fz_document_writer *fz_new_docx_writer_internal(fz_context *ctx, fz_outpu
 	return &writer->super;
 }
 
-fz_document_writer *fz_new_odt_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
-{
-	return fz_new_docx_writer_internal(ctx, out, options, extract_format_ODT);
-}
-
 fz_document_writer *fz_new_docx_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
 {
 	return fz_new_docx_writer_internal(ctx, out, options, extract_format_DOCX);
+}
+
+fz_document_writer *fz_new_docx_writer(fz_context *ctx, const char *path, const char *options)
+{
+	/* No need to drop <out> if fz_new_docx_writer_internal() throws, because
+	it always drops <out> if it fails. */
+	fz_output *out = fz_new_output_with_path(ctx, path, 0 /*append*/);
+	return fz_new_docx_writer_internal(ctx, out, options, extract_format_DOCX);
+}
+
+#if FZ_ENABLE_ODT_OUTPUT
+
+fz_document_writer *fz_new_odt_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
+{
+	return fz_new_docx_writer_internal(ctx, out, options, extract_format_ODT);
 }
 
 fz_document_writer *fz_new_odt_writer(fz_context *ctx, const char *path, const char *options)
@@ -635,10 +840,46 @@ fz_document_writer *fz_new_odt_writer(fz_context *ctx, const char *path, const c
 	return fz_new_docx_writer_internal(ctx, out, options, extract_format_ODT);
 }
 
+#else
+
+fz_document_writer *fz_new_odt_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
+{
+	fz_throw(ctx, FZ_ERROR_GENERIC, "ODT writer not enabled");
+	return NULL;
+}
+
+fz_document_writer *fz_new_odt_writer(fz_context *ctx, const char *path, const char *options)
+{
+	fz_throw(ctx, FZ_ERROR_GENERIC, "ODT writer not enabled");
+	return NULL;
+}
+
+#endif
+
+#else
+
+fz_document_writer *fz_new_odt_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
+{
+	fz_throw(ctx, FZ_ERROR_GENERIC, "DOCX/ODT writer not enabled");
+	return NULL;
+}
+
+fz_document_writer *fz_new_odt_writer(fz_context *ctx, const char *path, const char *options)
+{
+	fz_throw(ctx, FZ_ERROR_GENERIC, "DOCX/ODT writer not enabled");
+	return NULL;
+}
+
+fz_document_writer *fz_new_docx_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
+{
+	fz_throw(ctx, FZ_ERROR_GENERIC, "DOCX writer not enabled");
+	return NULL;
+}
+
 fz_document_writer *fz_new_docx_writer(fz_context *ctx, const char *path, const char *options)
 {
-	/* No need to drop <out> if fz_new_docx_writer_internal() throws, because
-	it always drops <out> if it fails. */
-	fz_output *out = fz_new_output_with_path(ctx, path, 0 /*append*/);
-	return fz_new_docx_writer_internal(ctx, out, options, extract_format_DOCX);
+	fz_throw(ctx, FZ_ERROR_GENERIC, "DOCX writer not enabled");
+	return NULL;
 }
+
+#endif

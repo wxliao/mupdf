@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
@@ -712,11 +712,14 @@ resize_code(fz_context *ctx, pdf_function *func, int newsize)
 }
 
 static void
-parse_code(fz_context *ctx, pdf_function *func, fz_stream *stream, int *codeptr, pdf_lexbuf *buf)
+parse_code(fz_context *ctx, pdf_function *func, fz_stream *stream, int *codeptr, pdf_lexbuf *buf, int depth)
 {
 	pdf_token tok;
 	int opptr, elseptr, ifptr;
 	int a, b, mid, cmp;
+
+	if (depth > 100)
+		fz_throw(ctx, FZ_ERROR_GENERIC, "too much recursion in calculator function");
 
 	while (1)
 	{
@@ -762,14 +765,14 @@ parse_code(fz_context *ctx, pdf_function *func, fz_stream *stream, int *codeptr,
 			resize_code(ctx, func, *codeptr);
 
 			ifptr = *codeptr;
-			parse_code(ctx, func, stream, codeptr, buf);
+			parse_code(ctx, func, stream, codeptr, buf, depth + 1);
 
 			tok = pdf_lex(ctx, stream, buf);
 
 			if (tok == PDF_TOK_OPEN_BRACE)
 			{
 				elseptr = *codeptr;
-				parse_code(ctx, func, stream, codeptr, buf);
+				parse_code(ctx, func, stream, codeptr, buf, depth + 1);
 
 				tok = pdf_lex(ctx, stream, buf);
 			}
@@ -878,7 +881,7 @@ load_postscript_func(fz_context *ctx, pdf_function *func, pdf_obj *dict)
 		func->u.p.cap = 0;
 
 		codeptr = 0;
-		parse_code(ctx, func, stream, &codeptr, &buf);
+		parse_code(ctx, func, stream, &codeptr, &buf, 0);
 	}
 	fz_always(ctx)
 	{

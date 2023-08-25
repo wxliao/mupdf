@@ -10,153 +10,58 @@ import sys
 
 import jlib
 
+from . import parse
 
 try:
-    try:
-        import clang.cindex
-    except ModuleNotFoundError as e:
-
-        # On devuan, clang-python isn't on python3's path, but python2's
-        # clang-python works fine with python3, so we deviously get the path by
-        # running some python 2.
-        #
-        e, clang_path = jlib.system( 'python2 -c "import clang; print clang.__path__[0]"', out='return', raise_errors=0)
-
-        if e == 0:
-            jlib.log( 'Retrying import of clang using info from python2 {clang_path=}')
-            sys.path.append( os.path.dirname( clang_path))
-            import clang.cindex
-        else:
-            raise
-
+    import clang.cindex
 except Exception as e:
     jlib.log('Warning: failed to import clang.cindex: {e=}\n'
             f'We need Clang Python to build MuPDF python.\n'
-            f'Install with "pip install libclang" or use the --venv option, or:\n'
-            f'    OpenBSD: pkg_add py3-llvm\n'
-            f'    Linux:debian/devuan: apt install python-clang\n'
+            f'Install with `pip install libclang` (typically inside a Python venv),\n'
+            f'or (OpenBSD only) `pkg_add py3-llvm.`\n'
             )
     clang = None
 
-
 omit_fns = [
         'fz_open_file_w',
-        'fz_set_stderr',
-        'fz_set_stdout',
         'fz_colorspace_name_process_colorants', # Not implemented in mupdf.so?
         'fz_clone_context_internal',            # Not implemented in mupdf?
-        'fz_arc4_final',
         'fz_assert_lock_held',      # Is a macro if NDEBUG defined.
         'fz_assert_lock_not_held',  # Is a macro if NDEBUG defined.
         'fz_lock_debug_lock',       # Is a macro if NDEBUG defined.
         'fz_lock_debug_unlock',     # Is a macro if NDEBUG defined.
         'fz_argv_from_wargv',       # Only defined on Windows. Breaks our out-param wrapper code.
+
+        # Only defined on Windows, so breaks building Windows wheels from
+        # sdist, because the C++ source in sdist (usually generated on Unix)
+        # does not contain these functions, but SWIG-generated code will try to
+        # call them.
+        'fz_utf8_from_wchar',
+        'fz_wchar_from_utf8',
+        'fz_fopen_utf8',
+        'fz_remove_utf8',
+        'fz_argv_from_wargv',
+        'fz_free_argv',
+        'fz_stdods',
         ]
 
-omit_methods = [
-        'fz_encode_character_with_fallback',    # Has 'fz_font **out_font' arg.
-        'fz_new_draw_device_with_options',      # Has 'fz_pixmap **pixmap' arg.
-        ]
+omit_methods = []
 
-class ClangInfo:
+
+def get_name_canonical( type_):
     '''
-    Sets things up so we can import and use clang.
-
-    Members:
-        .libclang_so
-        .resource_dir
-        .include_path
-        .clang_version
+    Wrap Clang's clang.cindex.Type.get_canonical() to avoid returning anonymous
+    struct that clang spells as 'struct (unnamed at ...)'.
     '''
-    def __init__( self):
-        '''
-        We look for different versions of clang until one works.
+    if type_.spelling == 'size_t':
+        #jlib.log( 'Not canonicalising {self.spelling=}')
+        return type_
+    ret = type_.get_canonical()
+    if 'struct (unnamed' in ret.spelling:
+        jlib.log( 'Not canonicalising {type_.spelling=}')
+        ret = type_
+    return ret
 
-        Searches for libclang.so and registers with
-        clang.cindex.Config.set_library_file(). This appears to be necessary
-        even when clang is installed as a standard package.
-        '''
-        if state_.windows:
-            # We require 'pip install libclang' which avoids the need to look
-            # for libclang.
-            return
-        for version in 11, 10, 9, 8, 7, 6,:
-            ok = self._try_init_clang( version)
-            if ok:
-                break
-        else:
-            raise Exception( 'cannot find libclang.so')
-
-    def _try_init_clang( self, version):
-        if state_.openbsd:
-            clang_bin = glob.glob( f'/usr/local/bin/clang-{version}')
-            if not clang_bin:
-                jlib.log('Cannot find {clang_bin=}', 1)
-                return
-            clang_bin = clang_bin[0]
-            self.clang_version = version
-            libclang_so = glob.glob( f'/usr/local/lib/libclang.so*')
-            assert len(libclang_so) == 1
-            self.libclang_so = libclang_so[0]
-            self.resource_dir = jlib.system(
-                    f'{clang_bin} -print-resource-dir',
-                    out='return',
-                    ).strip()
-            self.include_path = os.path.join( self.resource_dir, 'include')
-            #logx('{self.libclang_so=} {self.resource_dir=} {self.include_path=}')
-            if os.environ.get('VIRTUAL_ENV'):
-                clang.cindex.Config.set_library_file( self.libclang_so)
-            return True
-
-        for p in os.environ.get( 'PATH').split( ':'):
-            clang_bins = glob.glob( os.path.join( p, f'clang-{version}*'))
-            if not clang_bins:
-                continue
-            clang_bins.sort()
-            for clang_bin in clang_bins:
-                e, clang_search_dirs = jlib.system(
-                        f'{clang_bin} -print-search-dirs',
-                        #verbose=log,
-                        out='return',
-                        raise_errors=False,
-                        )
-                if e:
-                    jlib.log( '[could not find {clang_bin}: {e=}]')
-                    return
-                if version == 10:
-                    m = re.search( '\nlibraries: =(.+)\n', clang_search_dirs)
-                    assert m
-                    clang_search_dirs = m.group(1)
-                clang_search_dirs = clang_search_dirs.strip().split(':')
-                for i in ['/usr/lib', '/usr/local/lib'] + clang_search_dirs:
-                    for leaf in f'libclang-{version}.*so*', f'libclang.so.{version}.*':
-                        p = os.path.join( i, leaf)
-                        p = os.path.abspath( p)
-                        jlib.log( '{p=}')
-                        libclang_so = glob.glob( p)
-                        if not libclang_so:
-                            continue
-
-                        # We have found libclang.so.
-                        self.libclang_so = libclang_so[0]
-                        jlib.log( 'Using {self.libclang_so=}')
-                        clang.cindex.Config.set_library_file( self.libclang_so)
-                        self.resource_dir = jlib.system(
-                                f'{clang_bin} -print-resource-dir',
-                                out='return',
-                                ).strip()
-                        self.include_path = os.path.join( self.resource_dir, 'include')
-                        self.clang_version = version
-                        return True
-
-
-clang_info_cache = None
-
-def clang_info():
-    global clang_info_cache
-    if not clang_info_cache:
-        clang_info_cache = ClangInfo()
-    return clang_info_cache
 
 class State:
     def __init__( self):
@@ -165,6 +70,7 @@ class State:
         self.cygwin = self.os_name.startswith('CYGWIN')
         self.openbsd = self.os_name == 'OpenBSD'
         self.linux = self.os_name == 'Linux'
+        self.macos = self.os_name == 'Darwin'
         self.have_done_build_0 = False
 
         # Maps from <tu> to dict of fnname: cursor.
@@ -174,6 +80,7 @@ class State:
         self.global_data = dict()
 
         self.enums = dict()
+        self.structs = dict()
 
         # Code should show extra information if state_.show_details(name)
         # returns true.
@@ -186,33 +93,42 @@ class State:
         fns = dict()
         global_data = dict()
         enums = dict()
+        structs = dict()
 
-        for cursor in tu.cursor.get_children():
+        for cursor in parse.get_children(tu.cursor):
+            verbose = state_.show_details( cursor.spelling)
+            if verbose:
+                jlib.log('Looking at {cursor.spelling=} {cursor.kind=} {cursor.location=}')
             if cursor.kind==clang.cindex.CursorKind.ENUM_DECL:
                 #jlib.log('ENUM_DECL: {cursor.spelling=}')
                 enum_values = list()
                 for cursor2 in cursor.get_children():
                     #jlib.log('    {cursor2.spelling=}')
                     name = cursor2.spelling
-                    #if name.startswith('PDF_ENUM_NAME_'):
                     enum_values.append(name)
-                enums[ cursor.type.get_canonical().spelling] = enum_values
-            if (cursor.linkage == clang.cindex.LinkageKind.EXTERNAL
-                    or cursor.is_definition()  # Picks up static inline functions.
-                    ):
-                if cursor.kind == clang.cindex.CursorKind.FUNCTION_DECL:
-                    fnname = cursor.mangled_name
-                    if self.show_details( fnname):
-                        jlib.log( 'Looking at {fnname=}')
-                    if fnname not in omit_fns:
-                        fns[ fnname] = cursor
+                enums[ get_name_canonical( cursor.type).spelling] = enum_values
+            if cursor.kind==clang.cindex.CursorKind.TYPEDEF_DECL:
+                name = cursor.spelling
+                if name.startswith( ( 'fz_', 'pdf_')):
+                    structs[ name] = cursor
+            if cursor.kind == clang.cindex.CursorKind.FUNCTION_DECL:
+                fnname = cursor.spelling
+                if self.show_details( fnname):
+                    jlib.log( 'Looking at {fnname=}')
+                if fnname in omit_fns:
+                    jlib.log('{fnname=} is in omit_fns')
                 else:
-                    global_data[ cursor.mangled_name] = cursor
+                    fns[ fnname] = cursor
+            if (cursor.kind == clang.cindex.CursorKind.VAR_DECL
+                    and cursor.linkage == clang.cindex.LinkageKind.EXTERNAL
+                    ):
+                global_data[ cursor.spelling] = cursor
 
         self.functions_cache[ tu] = fns
         self.global_data[ tu] = global_data
         self.enums[ tu] = enums
-        jlib.log('Have populated fns and global_data. {len(enums)=}')
+        self.structs[ tu] = structs
+        jlib.log('Have populated fns and global_data. {len(enums)=} {len(self.structs)} {len(fns)=}')
 
     def find_functions_starting_with( self, tu, name_prefix, method):
         '''
@@ -225,10 +141,17 @@ class State:
         self.functions_cache_populate( tu)
         fn_to_cursor = self.functions_cache[ tu]
         for fnname, cursor in fn_to_cursor.items():
+            verbose = state_.show_details( fnname)
             if method and fnname in omit_methods:
+                if verbose:
+                    jlib.log('{fnname=} is in {omit_methods=}')
                 continue
             if not fnname.startswith( name_prefix):
+                if 0 and verbose:
+                    jlib.log('{fnname=} does not start with {name_prefix=}')
                 continue
+            if verbose:
+                jlib.log('{name_prefix=} yielding {fnname=}')
             yield fnname, cursor
 
     def find_global_data_starting_with( self, tu, prefix):
@@ -242,7 +165,7 @@ class State:
         '''
         assert ' ' not in fnname, f'fnname={fnname}'
         if method and fnname in omit_methods:
-            return
+            assert 0, f'method={method} fnname={fnname} omit_methods={omit_methods}'
         self.functions_cache_populate( tu)
         return self.functions_cache[ tu].get( fnname)
 
@@ -278,7 +201,9 @@ class Cpu:
         .windows_suffix
             '64' or '', e.g. mupdfcpp64.dll
     '''
-    def __init__(self, name):
+    def __init__(self, name=None):
+        if name is None:
+            name = cpu_name()
         self.name = name
         if name == 'x32':
             self.bits = 32
@@ -297,19 +222,24 @@ class Cpu:
 
     def __str__(self):
         return self.name
+    def __repr__(self):
+        return f'Cpu:{self.name}'
 
 def python_version():
     '''
     Returns two-digit version number of Python as a string, e.g. '3.9'.
     '''
-    return '.'.join(platform.python_version().split('.')[:2])
+    ret = '.'.join(platform.python_version().split('.')[:2])
+    #jlib.log(f'returning ret={ret!r}')
+    return ret
 
 def cpu_name():
     '''
     Returns 'x32' or 'x64' depending on Python build.
     '''
-    #log(f'sys.maxsize={hex(sys.maxsize)}')
-    return f'x{32 if sys.maxsize == 2**31 else 64}'
+    ret = f'x{32 if sys.maxsize == 2**31 - 1 else 64}'
+    #jlib.log(f'returning ret={ret!r}')
+    return ret
 
 def cmd_run_multiple(commands, prefix=None):
     '''
@@ -332,6 +262,7 @@ class BuildDirs:
     def __init__( self):
 
         # Assume we are in mupdf/scripts/.
+        #jlib.log( f'platform.platform(): {platform.platform()}')
         file_ = abspath( __file__)
         assert file_.endswith( f'/scripts/wrap/state.py'), \
                 'Unexpected __file__=%s file_=%s' % (__file__, file_)
@@ -345,38 +276,81 @@ class BuildDirs:
         self.ref_dir = abspath( f'{self.dir_mupdf}/mupdfwrap_ref')
         assert not self.ref_dir.endswith( '/')
 
-        if state_.windows:
-            # Default build depends on the Python that we are running under.
-            #
-            self.set_dir_so( f'{self.dir_mupdf}/build/shared-release-{cpu_name()}-py{python_version()}')
-        else:
-            self.set_dir_so( f'{self.dir_mupdf}/build/shared-release')
+        self.set_dir_so( f'{self.dir_mupdf}/build/shared-release')
 
     def set_dir_so( self, dir_so):
         '''
-        Sets self.dir_so and also updates self.cpp_flags etc.
+        Sets self.dir_so and also updates self.cpp_flags etc. Special case
+        `dir_so='-'` sets to None.
         '''
+        if dir_so == '-':
+            self.dir_so = None
+            self.cpp_flags = None
+            return
+
         dir_so = abspath( dir_so)
         self.dir_so = dir_so
 
-        if 0: pass  # lgtm [py/unreachable-statement]
-        elif '-debug' in dir_so:    self.cpp_flags = '-g'
-        elif '-release' in dir_so:  self.cpp_flags = '-O2 -DNDEBUG'
-        elif '-memento' in dir_so:  self.cpp_flags = '-g -DMEMENTO'
+        if state_.windows:
+            # debug builds have:
+            # /Od
+            # /D _DEBUG
+            # /RTC1
+            # /MDd
+            #
+            if 0: pass  # lgtm [py/unreachable-statement]
+            elif '-release' in dir_so:
+                self.cpp_flags = '/O2 /DNDEBUG'
+            elif '-debug' in dir_so:
+                # `/MDd` forces use of debug runtime and (i think via
+                # it setting `/D _DEBUG`) debug versions of things like
+                # `std::string` (incompatible with release builds). We also set
+                # `/Od` (no optimisation) and `/RTC1` (extra runtime checks)
+                # because these seem to be conventionally set in VS.
+                #
+                self.cpp_flags = '/MDd /Od /RTC1'
+            elif '-memento' in dir_so:
+                self.cpp_flags = '/MDd /Od /RTC1 /DMEMENTO'
+            else:
+                self.cpp_flags = None
+                jlib.log( 'Warning: unrecognised {dir_so=}, so cannot determine cpp_flags')
         else:
-            self.cpp_flags = None
-            jlib.log( 'Warning: unrecognised {dir_so=}, so cannot determine cpp_flags')
+            if 0: pass  # lgtm [py/unreachable-statement]
+            elif '-debug' in dir_so:    self.cpp_flags = '-g'
+            elif '-release' in dir_so:  self.cpp_flags = '-O2 -DNDEBUG'
+            elif '-memento' in dir_so:  self.cpp_flags = '-g -DMEMENTO'
+            else:
+                self.cpp_flags = None
+                jlib.log( 'Warning: unrecognised {dir_so=}, so cannot determine cpp_flags')
 
         # Set self.cpu and self.python_version.
         if state_.windows:
-            # Infer from self.dir_so.
-            m = re.match( 'shared-([a-z]+)(-(x[0-9]+))?(-py([0-9.]+))?$', os.path.basename(self.dir_so))
+            # Infer cpu and python version from self.dir_so. And append current
+            # cpu and python version if not already present.
+            leaf = os.path.basename(self.dir_so)
+            m = re.match( 'shared-([a-z]+)$', leaf)
+            if m:
+                suffix = f'-{Cpu(cpu_name())}-py{python_version()}'
+                jlib.log('Adding suffix to {leaf!r}: {suffix!r}')
+                self.dir_so += suffix
+                leaf = os.path.basename(self.dir_so)
+            m = re.match( 'shared-([a-z]+)(-(x[0-9]+))?(-py([0-9.]+))?$', leaf)
             #log(f'self.dir_so={self.dir_so} {os.path.basename(self.dir_so)} m={m}')
             assert m, f'Failed to parse dir_so={self.dir_so!r} - should be *-x32|x64-pyA.B'
+            assert m.group(3), f'No cpu in self.dir_so: {self.dir_so}'
             self.cpu = Cpu( m.group(3))
             self.python_version = m.group(5)
-            #log('{self.cpu=} {self.python_version=} {dir_so=}')
+            #jlib.log('{self.cpu=} {self.python_version=} {dir_so=}')
         else:
             # Use Python we are running under.
             self.cpu = Cpu(cpu_name())
             self.python_version = python_version()
+
+    def windows_build_type(self):
+        dir_so_flags = os.path.basename( self.dir_so).split( '-')
+        if 'debug' in dir_so_flags:
+            return 'Debug'
+        elif 'release' in dir_so_flags:
+            return 'Release'
+        else:
+            assert 0, f'Expecting "-release-" or "-debug-" in build_dirs.dir_so={self.dir_so}'

@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
@@ -69,6 +69,7 @@ typedef struct filter_gstate
 {
 	struct filter_gstate *next;
 	int pushed;
+	int empty_clip_region;
 	pdf_filter_gstate pending;
 	pdf_filter_gstate sent;
 } filter_gstate;
@@ -95,6 +96,13 @@ typedef struct tag_record
 	struct tag_record *prev;
 } tag_record;
 
+typedef struct resources_stack
+{
+	struct resources_stack *next;
+	pdf_obj *old_rdb;
+	pdf_obj *new_rdb;
+} resources_stack;
+
 typedef struct
 {
 	pdf_processor super;
@@ -104,6 +112,10 @@ typedef struct
 	pdf_processor *chain;
 	filter_gstate *gstate;
 	pdf_text_object_state tos;
+	/* If Td_pending, then any Tm_pending can be ignored and we can just
+	 * send a Td with Td_value rather than the Tm. */
+	int Td_pending;
+	fz_point Td_value;
 	int Tm_pending;
 	int BT_pending;
 	int in_BT;
@@ -111,49 +123,56 @@ typedef struct
 	void *font_name;
 	tag_record *current_tags;
 	tag_record *pending_tags;
-	pdf_obj *old_rdb, *new_rdb;
-	pdf_filter_options *filter;
+	resources_stack *rstack;
+	pdf_sanitize_filter_options *options;
 	fz_matrix transform;
-} pdf_filter_processor;
+	/* Has any marking text been sent so far this text object? */
+	int text_sent;
+	/* Has any marking text been removed so far this text object? */
+	int text_removed;
+	pdf_filter_options *global_options;
+	/* path is only constructed if we are using culling. */
+	fz_path *path;
+} pdf_sanitize_processor;
 
 static void
-copy_resource(fz_context *ctx, pdf_filter_processor *p, pdf_obj *key, const char *name)
+copy_resource(fz_context *ctx, pdf_sanitize_processor *p, pdf_obj *key, const char *name)
 {
 	pdf_obj *res, *obj;
 
 	if (!name || name[0] == 0)
 		return;
 
-	res = pdf_dict_get(ctx, p->old_rdb, key);
+	res = pdf_dict_get(ctx, p->rstack->old_rdb, key);
 	obj = pdf_dict_gets(ctx, res, name);
 	if (obj)
 	{
-		res = pdf_dict_get(ctx, p->new_rdb, key);
+		res = pdf_dict_get(ctx, p->rstack->new_rdb, key);
 		if (!res)
 		{
-			res = pdf_new_dict(ctx, pdf_get_bound_document(ctx, p->new_rdb), 1);
-			pdf_dict_put_drop(ctx, p->new_rdb, key, res);
+			res = pdf_new_dict(ctx, pdf_get_bound_document(ctx, p->rstack->new_rdb), 1);
+			pdf_dict_put_drop(ctx, p->rstack->new_rdb, key, res);
 		}
 		pdf_dict_putp(ctx, res, name, obj);
 	}
 }
 
 static void
-add_resource(fz_context *ctx, pdf_filter_processor *p, pdf_obj *key, const char *name, pdf_obj *val)
+add_resource(fz_context *ctx, pdf_sanitize_processor *p, pdf_obj *key, const char *name, pdf_obj *val)
 {
-	pdf_obj *res = pdf_dict_get(ctx, p->new_rdb, key);
+	pdf_obj *res = pdf_dict_get(ctx, p->rstack->new_rdb, key);
 	if (!res)
-		res = pdf_dict_put_dict(ctx, p->new_rdb, key, 8);
+		res = pdf_dict_put_dict(ctx, p->rstack->new_rdb, key, 8);
 	pdf_dict_puts(ctx, res, name, val);
 }
 
 static void
-create_resource_name(fz_context *ctx, pdf_filter_processor *p, pdf_obj *key, const char *prefix, char *buf, int len)
+create_resource_name(fz_context *ctx, pdf_sanitize_processor *p, pdf_obj *key, const char *prefix, char *buf, int len)
 {
 	int i;
-	pdf_obj *res = pdf_dict_get(ctx, p->new_rdb, key);
+	pdf_obj *res = pdf_dict_get(ctx, p->rstack->new_rdb, key);
 	if (!res)
-		res = pdf_dict_put_dict(ctx, p->new_rdb, key, 8);
+		res = pdf_dict_put_dict(ctx, p->rstack->new_rdb, key, 8);
 	for (i = 1; i < 65536; ++i)
 	{
 		fz_snprintf(buf, len, "%s%d", prefix, i);
@@ -164,7 +183,7 @@ create_resource_name(fz_context *ctx, pdf_filter_processor *p, pdf_obj *key, con
 }
 
 static void
-filter_push(fz_context *ctx, pdf_filter_processor *p)
+filter_push(fz_context *ctx, pdf_sanitize_processor *p)
 {
 	filter_gstate *gstate = p->gstate;
 	filter_gstate *new_gstate = fz_malloc_struct(ctx, filter_gstate);
@@ -178,7 +197,7 @@ filter_push(fz_context *ctx, pdf_filter_processor *p)
 }
 
 static int
-filter_pop(fz_context *ctx, pdf_filter_processor *p)
+filter_pop(fz_context *ctx, pdf_sanitize_processor *p)
 {
 	filter_gstate *gstate = p->gstate;
 	filter_gstate *old = gstate->next;
@@ -203,7 +222,7 @@ filter_pop(fz_context *ctx, pdf_filter_processor *p)
  * sane. This is important for being able to add new operators at
  * the end of pages in a sane way. */
 static filter_gstate *
-gstate_to_update(fz_context *ctx, pdf_filter_processor *p)
+gstate_to_update(fz_context *ctx, pdf_sanitize_processor *p)
 {
 	filter_gstate *gstate = p->gstate;
 
@@ -221,7 +240,7 @@ gstate_to_update(fz_context *ctx, pdf_filter_processor *p)
 	return p->gstate;
 }
 
-static void flush_tags(fz_context *ctx, pdf_filter_processor *p, tag_record **tags)
+static void flush_tags(fz_context *ctx, pdf_sanitize_processor *p, tag_record **tags)
 {
 	tag_record *tag = *tags;
 
@@ -241,10 +260,14 @@ static void flush_tags(fz_context *ctx, pdf_filter_processor *p, tag_record **ta
 	*tags = NULL;
 }
 
-static void filter_flush(fz_context *ctx, pdf_filter_processor *p, int flush)
+static void filter_flush(fz_context *ctx, pdf_sanitize_processor *p, int flush)
 {
 	filter_gstate *gstate = gstate_to_update(ctx, p);
 	int i;
+
+	/* No point in sending anything if we're clipping it away! */
+	if (p->gstate->empty_clip_region)
+		return;
 
 	if (gstate->pushed == 0)
 	{
@@ -470,63 +493,76 @@ done_SC:
 				p->chain->op_BT(ctx, p->chain);
 			p->BT_pending = 0;
 			p->in_BT = 1;
+			p->text_sent = 0;
+			p->text_removed = 0;
 		}
-		if (gstate->pending.text.char_space != gstate->sent.text.char_space)
+		if (p->in_BT)
 		{
-			if (p->chain->op_Tc)
-				p->chain->op_Tc(ctx, p->chain, gstate->pending.text.char_space);
-		}
-		if (gstate->pending.text.word_space != gstate->sent.text.word_space)
-		{
-			if (p->chain->op_Tw)
-				p->chain->op_Tw(ctx, p->chain, gstate->pending.text.word_space);
-		}
-		if (gstate->pending.text.scale != gstate->sent.text.scale)
-		{
-			/* The value of scale in the gstate is divided by 100 from what is written in the file */
-			if (p->chain->op_Tz)
-				p->chain->op_Tz(ctx, p->chain, gstate->pending.text.scale*100);
-		}
-		if (gstate->pending.text.leading != gstate->sent.text.leading)
-		{
-			if (p->chain->op_TL)
-				p->chain->op_TL(ctx, p->chain, gstate->pending.text.leading);
-		}
-		if (gstate->pending.text.font != gstate->sent.text.font ||
-			gstate->pending.text.size != gstate->sent.text.size)
-		{
-			if (p->chain->op_Tf)
-				p->chain->op_Tf(ctx, p->chain, p->font_name, gstate->pending.text.font, gstate->pending.text.size);
-		}
-		if (gstate->pending.text.render != gstate->sent.text.render)
-		{
-			if (p->chain->op_Tr)
-				p->chain->op_Tr(ctx, p->chain, gstate->pending.text.render);
-		}
-		if (gstate->pending.text.rise != gstate->sent.text.rise)
-		{
-			if (p->chain->op_Ts)
-				p->chain->op_Ts(ctx, p->chain, gstate->pending.text.rise);
-		}
-		pdf_drop_font(ctx, gstate->sent.text.font);
-		gstate->sent.text = gstate->pending.text;
-		gstate->sent.text.font = pdf_keep_font(ctx, gstate->pending.text.font);
-		if (p->Tm_pending != 0)
-		{
-			if (p->chain->op_Tm)
-				p->chain->op_Tm(ctx, p->chain, p->tos.tlm.a, p->tos.tlm.b, p->tos.tlm.c, p->tos.tlm.d, p->tos.tlm.e, p->tos.tlm.f);
-			p->Tm_pending = 0;
+			if (gstate->pending.text.char_space != gstate->sent.text.char_space)
+			{
+				if (p->chain->op_Tc)
+					p->chain->op_Tc(ctx, p->chain, gstate->pending.text.char_space);
+			}
+			if (gstate->pending.text.word_space != gstate->sent.text.word_space)
+			{
+				if (p->chain->op_Tw)
+					p->chain->op_Tw(ctx, p->chain, gstate->pending.text.word_space);
+			}
+			if (gstate->pending.text.scale != gstate->sent.text.scale)
+			{
+				/* The value of scale in the gstate is divided by 100 from what is written in the file */
+				if (p->chain->op_Tz)
+					p->chain->op_Tz(ctx, p->chain, gstate->pending.text.scale*100);
+			}
+			if (gstate->pending.text.leading != gstate->sent.text.leading)
+			{
+				if (p->chain->op_TL)
+					p->chain->op_TL(ctx, p->chain, gstate->pending.text.leading);
+			}
+			if (gstate->pending.text.font != gstate->sent.text.font ||
+				gstate->pending.text.size != gstate->sent.text.size)
+			{
+				if (p->chain->op_Tf)
+					p->chain->op_Tf(ctx, p->chain, p->font_name, gstate->pending.text.font, gstate->pending.text.size);
+			}
+			if (gstate->pending.text.render != gstate->sent.text.render)
+			{
+				if (p->chain->op_Tr)
+					p->chain->op_Tr(ctx, p->chain, gstate->pending.text.render);
+			}
+			if (gstate->pending.text.rise != gstate->sent.text.rise)
+			{
+				if (p->chain->op_Ts)
+					p->chain->op_Ts(ctx, p->chain, gstate->pending.text.rise);
+			}
+			pdf_drop_font(ctx, gstate->sent.text.font);
+			gstate->sent.text = gstate->pending.text;
+			gstate->sent.text.font = pdf_keep_font(ctx, gstate->pending.text.font);
+
+			if (p->Td_pending != 0)
+			{
+				if (p->chain->op_Td)
+					p->chain->op_Td(ctx, p->chain, p->Td_value.x, p->Td_value.y);
+				p->Tm_pending = 0;
+				p->Td_pending = 0;
+			}
+			else if (p->Tm_pending != 0)
+			{
+				if (p->chain->op_Tm)
+					p->chain->op_Tm(ctx, p->chain, p->tos.tlm.a, p->tos.tlm.b, p->tos.tlm.c, p->tos.tlm.d, p->tos.tlm.e, p->tos.tlm.f);
+				p->Tm_pending = 0;
+			}
 		}
 	}
 }
 
 static int
-filter_show_char(fz_context *ctx, pdf_filter_processor *p, int cid, int *unicode)
+filter_show_char(fz_context *ctx, pdf_sanitize_processor *p, int cid, int *unicode)
 {
 	filter_gstate *gstate = p->gstate;
 	pdf_font_desc *fontdesc = gstate->pending.text.font;
 	fz_matrix trm;
-	int ucsbuf[8];
+	int ucsbuf[PDF_MRANGE_CAP];
 	int ucslen;
 	int remove = 0;
 
@@ -547,7 +583,7 @@ filter_show_char(fz_context *ctx, pdf_filter_processor *p, int cid, int *unicode
 	}
 	*unicode = ucsbuf[0];
 
-	if (p->filter->text_filter)
+	if (p->options->text_filter || p->options->culler)
 	{
 		fz_matrix ctm;
 		fz_rect bbox;
@@ -571,7 +607,14 @@ filter_show_char(fz_context *ctx, pdf_filter_processor *p, int cid, int *unicode
 			bbox.y1 = fz_advance_glyph(ctx, fontdesc->font, p->tos.gid, 1);
 		}
 
-		remove = p->filter->text_filter(ctx, p->filter->opaque, ucsbuf, ucslen, trm, ctm, bbox);
+		if (p->options->text_filter)
+			remove = p->options->text_filter(ctx, p->options->opaque, ucsbuf, ucslen, trm, ctm, bbox);
+		if (p->options->culler && !remove)
+		{
+			ctm = fz_concat(trm, ctm);
+			bbox = fz_transform_rect(bbox, ctm);
+			remove = p->options->culler(ctx, p->options->opaque, bbox, FZ_CULL_GLYPH);
+		}
 	}
 
 	pdf_tos_move_after_char(ctx, &p->tos);
@@ -580,7 +623,7 @@ filter_show_char(fz_context *ctx, pdf_filter_processor *p, int cid, int *unicode
 }
 
 static void
-filter_show_space(fz_context *ctx, pdf_filter_processor *p, float tadj)
+filter_show_space(fz_context *ctx, pdf_sanitize_processor *p, float tadj)
 {
 	filter_gstate *gstate = p->gstate;
 	pdf_font_desc *fontdesc = gstate->pending.text.font;
@@ -649,7 +692,7 @@ walk_string(fz_context *ctx, int uni, int remove, editable_str *str)
  * what we're meeting, just take the easy route and delete
  * the whole lot. */
 static void
-mcid_char_imp(fz_context *ctx, pdf_filter_processor *p, tag_record *tr, int uni, int remove)
+mcid_char_imp(fz_context *ctx, pdf_sanitize_processor *p, tag_record *tr, int uni, int remove)
 {
 	if (tr->mcid_obj == NULL)
 		/* No object, or already deleted */
@@ -700,7 +743,7 @@ mcid_char_imp(fz_context *ctx, pdf_filter_processor *p, tag_record *tr, int uni,
 /* For every character that is processed, consider that character in
  * every pending/current MCID. */
 static void
-mcid_char(fz_context *ctx, pdf_filter_processor *p, int uni, int remove)
+mcid_char(fz_context *ctx, pdf_sanitize_processor *p, int uni, int remove)
 {
 	tag_record *tr  = p->pending_tags;
 
@@ -711,7 +754,7 @@ mcid_char(fz_context *ctx, pdf_filter_processor *p, int uni, int remove)
 }
 
 static void
-update_mcid(fz_context *ctx, pdf_filter_processor *p)
+update_mcid(fz_context *ctx, pdf_sanitize_processor *p)
 {
 	tag_record *tag = p->current_tags;
 
@@ -732,7 +775,7 @@ update_mcid(fz_context *ctx, pdf_filter_processor *p)
  * we hit the end).
  */
 static void
-filter_string_to_segment(fz_context *ctx, pdf_filter_processor *p, unsigned char *buf, size_t len, size_t *pos, int *inc, int *removed_space)
+filter_string_to_segment(fz_context *ctx, pdf_sanitize_processor *p, unsigned char *buf, size_t len, size_t *pos, int *inc, int *removed_space)
 {
 	filter_gstate *gstate = p->gstate;
 	pdf_font_desc *fontdesc = gstate->pending.text.font;
@@ -761,6 +804,16 @@ filter_string_to_segment(fz_context *ctx, pdf_filter_processor *p, unsigned char
 		else
 			remove = filter_show_char(ctx, p, cid, &uni);
 
+		/* FIXME: Should check for marking/non-marking! For
+		 * now assume space is the only non-marking. */
+		if (cpt != 32)
+		{
+			if (remove)
+				p->text_removed = 1;
+			else
+				p->text_sent = 1;
+		}
+
 		if (cpt == 32 && *inc == 1)
 			filter_show_space(ctx, p, gstate->pending.text.word_space);
 
@@ -777,7 +830,7 @@ filter_string_to_segment(fz_context *ctx, pdf_filter_processor *p, unsigned char
 }
 
 static void
-adjust_text(fz_context *ctx, pdf_filter_processor *p, float x, float y)
+adjust_text(fz_context *ctx, pdf_sanitize_processor *p, float x, float y)
 {
 	float skip_dist = p->tos.fontdesc->wmode == 1 ? -y : -x;
 	skip_dist = skip_dist / p->gstate->pending.text.size;
@@ -785,7 +838,7 @@ adjust_text(fz_context *ctx, pdf_filter_processor *p, float x, float y)
 }
 
 static void
-adjust_for_removed_space(fz_context *ctx, pdf_filter_processor *p)
+adjust_for_removed_space(fz_context *ctx, pdf_sanitize_processor *p)
 {
 	filter_gstate *gstate = p->gstate;
 	float adj = gstate->pending.text.word_space;
@@ -793,7 +846,7 @@ adjust_for_removed_space(fz_context *ctx, pdf_filter_processor *p)
 }
 
 static void
-flush_adjustment(fz_context *ctx, pdf_filter_processor *p)
+flush_adjustment(fz_context *ctx, pdf_sanitize_processor *p)
 {
 	pdf_obj *arr;
 
@@ -817,7 +870,7 @@ flush_adjustment(fz_context *ctx, pdf_filter_processor *p)
 }
 
 static void
-push_adjustment_to_array(fz_context *ctx, pdf_filter_processor *p, pdf_obj *arr)
+push_adjustment_to_array(fz_context *ctx, pdf_sanitize_processor *p, pdf_obj *arr)
 {
 	if (p->Tm_adjust == 0)
 		return;
@@ -826,7 +879,7 @@ push_adjustment_to_array(fz_context *ctx, pdf_filter_processor *p, pdf_obj *arr)
 }
 
 static void
-filter_show_string(fz_context *ctx, pdf_filter_processor *p, unsigned char *buf, size_t len)
+filter_show_string(fz_context *ctx, pdf_sanitize_processor *p, unsigned char *buf, size_t len)
 {
 	filter_gstate *gstate = p->gstate;
 	pdf_font_desc *fontdesc = gstate->pending.text.font;
@@ -836,6 +889,7 @@ filter_show_string(fz_context *ctx, pdf_filter_processor *p, unsigned char *buf,
 	if (!fontdesc)
 		return;
 
+	p->tos.fontdesc = fontdesc;
 	i = 0;
 	while (i < len)
 	{
@@ -860,7 +914,7 @@ filter_show_string(fz_context *ctx, pdf_filter_processor *p, unsigned char *buf,
 }
 
 static void
-filter_show_text(fz_context *ctx, pdf_filter_processor *p, pdf_obj *text)
+filter_show_text(fz_context *ctx, pdf_sanitize_processor *p, pdf_obj *text)
 {
 	filter_gstate *gstate = p->gstate;
 	pdf_font_desc *fontdesc = gstate->pending.text.font;
@@ -944,39 +998,59 @@ filter_show_text(fz_context *ctx, pdf_filter_processor *p, pdf_obj *text)
 static void
 pdf_filter_w(fz_context *ctx, pdf_processor *proc, float linewidth)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	gstate->pending.stroke.linewidth = linewidth;
 }
 
 static void
 pdf_filter_j(fz_context *ctx, pdf_processor *proc, int linejoin)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	gstate->pending.stroke.linejoin = linejoin;
 }
 
 static void
 pdf_filter_J(fz_context *ctx, pdf_processor *proc, int linecap)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	gstate->pending.stroke.linecap = linecap;
 }
 
 static void
 pdf_filter_M(fz_context *ctx, pdf_processor *proc, float miterlimit)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	gstate->pending.stroke.miterlimit = miterlimit;
 }
 
 static void
 pdf_filter_d(fz_context *ctx, pdf_processor *proc, pdf_obj *array, float phase)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_d)
 		p->chain->op_d(ctx, p->chain, array, phase);
@@ -985,7 +1059,11 @@ pdf_filter_d(fz_context *ctx, pdf_processor *proc, pdf_obj *array, float phase)
 static void
 pdf_filter_ri(fz_context *ctx, pdf_processor *proc, const char *intent)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_ri)
 		p->chain->op_ri(ctx, p->chain, intent);
@@ -994,7 +1072,11 @@ pdf_filter_ri(fz_context *ctx, pdf_processor *proc, const char *intent)
 static void
 pdf_filter_gs_OP(fz_context *ctx, pdf_processor *proc, int b)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_gs_OP)
 		p->chain->op_gs_OP(ctx, p->chain, b);
@@ -1003,7 +1085,11 @@ pdf_filter_gs_OP(fz_context *ctx, pdf_processor *proc, int b)
 static void
 pdf_filter_gs_op(fz_context *ctx, pdf_processor *proc, int b)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_gs_op)
 		p->chain->op_gs_op(ctx, p->chain, b);
@@ -1012,7 +1098,11 @@ pdf_filter_gs_op(fz_context *ctx, pdf_processor *proc, int b)
 static void
 pdf_filter_gs_OPM(fz_context *ctx, pdf_processor *proc, int i)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_gs_OPM)
 		p->chain->op_gs_OPM(ctx, p->chain, i);
@@ -1021,7 +1111,11 @@ pdf_filter_gs_OPM(fz_context *ctx, pdf_processor *proc, int i)
 static void
 pdf_filter_gs_UseBlackPtComp(fz_context *ctx, pdf_processor *proc, pdf_obj *name)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_gs_UseBlackPtComp)
 		p->chain->op_gs_UseBlackPtComp(ctx, p->chain, name);
@@ -1030,7 +1124,11 @@ pdf_filter_gs_UseBlackPtComp(fz_context *ctx, pdf_processor *proc, pdf_obj *name
 static void
 pdf_filter_i(fz_context *ctx, pdf_processor *proc, float flatness)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_i)
 		p->chain->op_i(ctx, p->chain, flatness);
@@ -1039,7 +1137,11 @@ pdf_filter_i(fz_context *ctx, pdf_processor *proc, float flatness)
 static void
 pdf_filter_gs_begin(fz_context *ctx, pdf_processor *proc, const char *name, pdf_obj *extgstate)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_gs_begin)
 		p->chain->op_gs_begin(ctx, p->chain, name, extgstate);
@@ -1049,7 +1151,11 @@ pdf_filter_gs_begin(fz_context *ctx, pdf_processor *proc, const char *name, pdf_
 static void
 pdf_filter_gs_BM(fz_context *ctx, pdf_processor *proc, const char *blendmode)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	if (p->chain->op_gs_BM)
 		p->chain->op_gs_BM(ctx, p->chain, blendmode);
 }
@@ -1057,7 +1163,11 @@ pdf_filter_gs_BM(fz_context *ctx, pdf_processor *proc, const char *blendmode)
 static void
 pdf_filter_gs_CA(fz_context *ctx, pdf_processor *proc, float alpha)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	if (p->chain->op_gs_CA)
 		p->chain->op_gs_CA(ctx, p->chain, alpha);
 }
@@ -1065,23 +1175,35 @@ pdf_filter_gs_CA(fz_context *ctx, pdf_processor *proc, float alpha)
 static void
 pdf_filter_gs_ca(fz_context *ctx, pdf_processor *proc, float alpha)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	if (p->chain->op_gs_ca)
 		p->chain->op_gs_ca(ctx, p->chain, alpha);
 }
 
 static void
-pdf_filter_gs_SMask(fz_context *ctx, pdf_processor *proc, pdf_obj *smask, pdf_obj *page_resources, float *bc, int luminosity)
+pdf_filter_gs_SMask(fz_context *ctx, pdf_processor *proc, pdf_obj *smask, float *bc, int luminosity)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	if (p->chain->op_gs_SMask)
-		p->chain->op_gs_SMask(ctx, p->chain, smask, page_resources, bc, luminosity);
+		p->chain->op_gs_SMask(ctx, p->chain, smask, bc, luminosity);
 }
 
 static void
 pdf_filter_gs_end(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	if (p->chain->op_gs_end)
 		p->chain->op_gs_end(ctx, p->chain);
 }
@@ -1091,31 +1213,23 @@ pdf_filter_gs_end(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_q(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
-	filter_push(ctx, p);
-}
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 
-static void
-pdf_filter_Q(fz_context *ctx, pdf_processor *proc)
-{
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
-	filter_flush(ctx, p, FLUSH_TEXT);
-	if (p->in_BT)
-	{
-		if (p->chain->op_ET)
-			p->chain->op_ET(ctx, p->chain);
-		p->in_BT = 0;
-		p->BT_pending = 1;
-	}
-	filter_pop(ctx, p);
+	if (p->gstate->empty_clip_region)
+		return;
+
+	filter_push(ctx, p);
 }
 
 static void
 pdf_filter_cm(fz_context *ctx, pdf_processor *proc, float a, float b, float c, float d, float e, float f)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
 	fz_matrix ctm;
+
+	if (p->gstate->empty_clip_region)
+		return;
 
 	/* If we're being given an identity matrix, don't bother sending it */
 	if (a == 1 && b == 0 && c == 0 && d == 1 && e == 0 && f == 0)
@@ -1136,7 +1250,17 @@ pdf_filter_cm(fz_context *ctx, pdf_processor *proc, float a, float b, float c, f
 static void
 pdf_filter_m(fz_context *ctx, pdf_processor *proc, float x, float y)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_moveto(ctx, p->path, x, y);
+		return;
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_m)
 		p->chain->op_m(ctx, p->chain, x, y);
@@ -1145,7 +1269,17 @@ pdf_filter_m(fz_context *ctx, pdf_processor *proc, float x, float y)
 static void
 pdf_filter_l(fz_context *ctx, pdf_processor *proc, float x, float y)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_lineto(ctx, p->path, x, y);
+		return;
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_l)
 		p->chain->op_l(ctx, p->chain, x, y);
@@ -1154,7 +1288,17 @@ pdf_filter_l(fz_context *ctx, pdf_processor *proc, float x, float y)
 static void
 pdf_filter_c(fz_context *ctx, pdf_processor *proc, float x1, float y1, float x2, float y2, float x3, float y3)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_curveto(ctx, p->path, x1, y1, x2, y2, x3, y3);
+		return;
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_c)
 		p->chain->op_c(ctx, p->chain, x1, y1, x2, y2, x3, y3);
@@ -1163,7 +1307,17 @@ pdf_filter_c(fz_context *ctx, pdf_processor *proc, float x1, float y1, float x2,
 static void
 pdf_filter_v(fz_context *ctx, pdf_processor *proc, float x2, float y2, float x3, float y3)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_curvetov(ctx, p->path, x2, y2, x3, y3);
+		return;
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_v)
 		p->chain->op_v(ctx, p->chain, x2, y2, x3, y3);
@@ -1172,7 +1326,17 @@ pdf_filter_v(fz_context *ctx, pdf_processor *proc, float x2, float y2, float x3,
 static void
 pdf_filter_y(fz_context *ctx, pdf_processor *proc, float x1, float y1, float x3, float y3)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_curvetoy(ctx, p->path, x1, y1, x3, y3);
+		return;
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_y)
 		p->chain->op_y(ctx, p->chain, x1, y1, x3, y3);
@@ -1181,7 +1345,17 @@ pdf_filter_y(fz_context *ctx, pdf_processor *proc, float x1, float y1, float x3,
 static void
 pdf_filter_h(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_closepath(ctx, p->path);
+		return;
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_h)
 		p->chain->op_h(ctx, p->chain);
@@ -1190,7 +1364,17 @@ pdf_filter_h(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_re(fz_context *ctx, pdf_processor *proc, float x, float y, float w, float h)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_rectto(ctx, p->path, x, y, x+w, y+h);
+		return;
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_re)
 		p->chain->op_re(ctx, p->chain, x, y, w, h);
@@ -1199,9 +1383,239 @@ pdf_filter_re(fz_context *ctx, pdf_processor *proc, float x, float y, float w, f
 /* path painting */
 
 static void
+cull_replay_moveto(fz_context *ctx, void *arg, float x, float y)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)arg;
+
+	if (p->chain->op_m)
+		p->chain->op_m(ctx, p->chain, x, y);
+}
+
+static void cull_replay_lineto(fz_context *ctx, void *arg, float x, float y)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)arg;
+
+	if (p->chain->op_l)
+		p->chain->op_l(ctx, p->chain, x, y);
+}
+
+static void
+cull_replay_curveto(fz_context *ctx, void *arg, float x1, float y1, float x2, float y2, float x3, float y3)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)arg;
+
+	if (p->chain->op_c)
+		p->chain->op_c(ctx, p->chain, x1, y1, x2, y2, x3, y3);
+}
+
+static void
+cull_replay_closepath(fz_context *ctx, void *arg)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)arg;
+
+	if (p->chain->op_h)
+		p->chain->op_h(ctx, p->chain);
+}
+
+static void
+cull_replay_curvetov(fz_context *ctx, void *arg, float x2, float y2, float x3, float y3)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)arg;
+
+	if (p->chain->op_v)
+		p->chain->op_v(ctx, p->chain, x2, y2, x3, y3);
+}
+
+static void
+cull_replay_curvetoy(fz_context *ctx, void *arg, float x1, float y1, float x3, float y3)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)arg;
+
+	if (p->chain->op_y)
+		p->chain->op_y(ctx, p->chain, x1, y1, x3, y3);
+}
+
+static void
+cull_replay_rectto(fz_context *ctx, void *arg, float x1, float y1, float x2, float y2)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)arg;
+
+	if (p->chain->op_re)
+		p->chain->op_re(ctx, p->chain, x1, y1, x2, y2);
+}
+
+typedef struct
+{
+	pdf_sanitize_processor *p;
+	fz_stroke_state sstate;
+	fz_path *segment;
+	fz_matrix ctm;
+	int any_sent;
+	int type;
+} segmenter_data_t;
+
+static void
+end_segment(fz_context *ctx, segmenter_data_t *sd)
+{
+	static const fz_path_walker walker = {
+		cull_replay_moveto,
+		cull_replay_lineto,
+		cull_replay_curveto,
+		cull_replay_closepath,
+		NULL /* quad */,
+		cull_replay_curvetov,
+		cull_replay_curvetoy,
+		cull_replay_rectto
+	};
+	fz_rect r;
+
+	if (sd->segment == NULL)
+		return;
+
+	r = fz_bound_path(ctx, sd->segment, (sd->type == FZ_CULL_PATH_STROKE || sd->type == FZ_CULL_PATH_FILL_STROKE) ? &sd->sstate : NULL, sd->ctm);
+
+	if (sd->p->options->culler(ctx, sd->p->options->opaque, r, sd->type))
+	{
+		/* This segment can be skipped */
+	}
+	else
+	{
+		/* Better send this segment then! */
+		fz_walk_path(ctx, sd->segment, &walker, sd->p);
+		sd->any_sent = 1;
+	}
+	fz_drop_path(ctx, sd->segment);
+	sd->segment = NULL;
+}
+
+static void
+cull_segmenter_moveto(fz_context *ctx, void *arg, float x, float y)
+{
+	segmenter_data_t *sd = (segmenter_data_t *)arg;
+
+	end_segment(ctx, sd);
+	sd->segment = fz_new_path(ctx);
+	fz_moveto(ctx, sd->segment, x, y);
+}
+
+static void
+cull_segmenter_lineto(fz_context *ctx, void *arg, float x, float y)
+{
+	segmenter_data_t *sd = (segmenter_data_t *)arg;
+
+	fz_lineto(ctx, sd->segment, x, y);
+}
+
+static void
+cull_segmenter_curveto(fz_context *ctx, void *arg, float x1, float y1, float x2, float y2, float x3, float y3)
+{
+	segmenter_data_t *sd = (segmenter_data_t *)arg;
+
+	fz_curveto(ctx, sd->segment, x1, y1, x2, y2, x3, y3);
+}
+
+static void
+cull_segmenter_closepath(fz_context *ctx, void *arg)
+{
+	segmenter_data_t *sd = (segmenter_data_t *)arg;
+
+	fz_closepath(ctx, sd->segment);
+}
+
+static void
+cull_segmenter_curvetov(fz_context *ctx, void *arg, float x2, float y2, float x3, float y3)
+{
+	segmenter_data_t *sd = (segmenter_data_t *)arg;
+
+	fz_curvetov(ctx, sd->segment, x2, y2, x3, y3);
+}
+
+static void
+cull_segmenter_curvetoy(fz_context *ctx, void *arg, float x1, float y1, float x3, float y3)
+{
+	segmenter_data_t *sd = (segmenter_data_t *)arg;
+
+	fz_curvetoy(ctx, sd->segment, x1, y1, x3, y3);
+}
+
+static void
+cull_segmenter_rectto(fz_context *ctx, void *arg, float x1, float y1, float x2, float y2)
+{
+	segmenter_data_t *sd = (segmenter_data_t *)arg;
+
+	end_segment(ctx, sd);
+	sd->segment = fz_new_path(ctx);
+	fz_rectto(ctx, sd->segment, x1, y1, x2, y2);
+}
+
+
+static int
+cull_path(fz_context *ctx, pdf_sanitize_processor *p, int type)
+{
+	segmenter_data_t sd = { 0 };
+	static const fz_path_walker segmenter = {
+		cull_segmenter_moveto,
+		cull_segmenter_lineto,
+		cull_segmenter_curveto,
+		cull_segmenter_closepath,
+		NULL /* quad */,
+		cull_segmenter_curvetov,
+		cull_segmenter_curvetoy,
+		cull_segmenter_rectto
+	};
+
+	if (p->options->culler == NULL)
+		return 0;
+
+	sd.ctm = fz_concat(p->gstate->pending.ctm, p->gstate->sent.ctm);
+	sd.ctm = fz_concat(sd.ctm, p->transform);
+
+	if (type == FZ_CULL_PATH_STROKE || type == FZ_CULL_PATH_FILL_STROKE)
+	{
+		sd.sstate.refs = -1;
+		sd.sstate.start_cap = p->gstate->pending.stroke.linecap;
+		sd.sstate.dash_cap = p->gstate->pending.stroke.linecap;
+		sd.sstate.end_cap = p->gstate->pending.stroke.linecap;
+		sd.sstate.linejoin = p->gstate->pending.stroke.linejoin;
+		sd.sstate.linewidth = p->gstate->pending.stroke.linewidth;
+		sd.sstate.miterlimit = p->gstate->pending.stroke.miterlimit;
+		/* Ignore dash for now. */
+		sd.sstate.dash_phase = 0;
+		sd.sstate.dash_len = 0;
+	}
+
+	sd.p = p;
+	sd.segment = NULL;
+	sd.type = type;
+	fz_try(ctx)
+	{
+		fz_walk_path(ctx, p->path, &segmenter, &sd);
+		end_segment(ctx, &sd);
+	}
+	fz_always(ctx)
+		fz_drop_path(ctx, sd.segment);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+
+	fz_drop_path(ctx, p->path);
+	p->path = NULL;
+	p->path = fz_new_path(ctx);
+
+	/* If none were sent, we can skip this path. */
+	return (sd.any_sent == 0);
+}
+
+static void
 pdf_filter_S(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_STROKE))
+		return;
+
 	filter_flush(ctx, p, FLUSH_STROKE);
 	if (p->chain->op_S)
 		p->chain->op_S(ctx, p->chain);
@@ -1210,7 +1624,14 @@ pdf_filter_S(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_s(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_STROKE))
+		return;
+
 	filter_flush(ctx, p, FLUSH_STROKE);
 	if (p->chain->op_s)
 		p->chain->op_s(ctx, p->chain);
@@ -1219,8 +1640,17 @@ pdf_filter_s(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_F(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_FILL))
+		return;
+
 	filter_flush(ctx, p, FLUSH_FILL);
+	if (p->gstate->empty_clip_region)
+		return;
 	if (p->chain->op_F)
 		p->chain->op_F(ctx, p->chain);
 }
@@ -1228,7 +1658,14 @@ pdf_filter_F(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_f(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_FILL))
+		return;
+
 	filter_flush(ctx, p, FLUSH_FILL);
 	if (p->chain->op_f)
 		p->chain->op_f(ctx, p->chain);
@@ -1237,7 +1674,14 @@ pdf_filter_f(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_fstar(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_FILL))
+		return;
+
 	filter_flush(ctx, p, FLUSH_FILL);
 	if (p->chain->op_fstar)
 		p->chain->op_fstar(ctx, p->chain);
@@ -1246,7 +1690,14 @@ pdf_filter_fstar(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_B(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_FILL_STROKE))
+		return;
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_B)
 		p->chain->op_B(ctx, p->chain);
@@ -1255,7 +1706,14 @@ pdf_filter_B(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_Bstar(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_FILL_STROKE))
+		return;
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_Bstar)
 		p->chain->op_Bstar(ctx, p->chain);
@@ -1264,7 +1722,14 @@ pdf_filter_Bstar(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_b(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_FILL_STROKE))
+		return;
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_b)
 		p->chain->op_b(ctx, p->chain);
@@ -1273,7 +1738,14 @@ pdf_filter_b(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_bstar(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_PATH_FILL_STROKE))
+		return;
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_bstar)
 		p->chain->op_bstar(ctx, p->chain);
@@ -1282,7 +1754,18 @@ pdf_filter_bstar(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_n(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_drop_path(ctx, p->path);
+		p->path = NULL;
+		p->path = fz_new_path(ctx);
+	}
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_n)
 		p->chain->op_n(ctx, p->chain);
@@ -1293,7 +1776,14 @@ pdf_filter_n(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_W(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_CLIP_PATH))
+		return;
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_W)
 		p->chain->op_W(ctx, p->chain);
@@ -1302,7 +1792,14 @@ pdf_filter_W(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_Wstar(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (cull_path(ctx, p, FZ_CULL_CLIP_PATH))
+		return;
+
 	filter_flush(ctx, p, FLUSH_CTM);
 	if (p->chain->op_Wstar)
 		p->chain->op_Wstar(ctx, p->chain);
@@ -1313,17 +1810,28 @@ pdf_filter_Wstar(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_BT(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	p->tos.tm = fz_identity;
 	p->tos.tlm = fz_identity;
 	p->BT_pending = 1;
+	p->text_sent = 0;
+	p->text_removed = 0;
+	p->Td_pending = 0;
+	p->Td_value.x = p->Td_value.y = 0;
 }
 
 static void
 pdf_filter_ET(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
 
 	if (!p->BT_pending)
 	{
@@ -1332,18 +1840,39 @@ pdf_filter_ET(fz_context *ctx, pdf_processor *proc)
 			p->chain->op_ET(ctx, p->chain);
 		p->in_BT = 0;
 	}
+	if ((p->gstate->pending.text.render & 4) && p->text_removed && !p->text_sent)
+	{
+		/* We've just had an empty (or non-marking) BT/ET, where clipping is
+		 * enabled, and previously it was non-empty. This means we've changed
+		 * it from a finite clip path, to something that doesn't change the
+		 * clip path at all. We actually want it to be an empty clip path,
+		 * but we can't easily achieve that. So we have to do the clipping
+		 * ourselves. */
+		p->gstate->empty_clip_region = 1;
+	}
 	p->BT_pending = 0;
-	if (p->filter->after_text_object)
+	if (p->options->after_text_object)
 	{
 		fz_matrix ctm;
 		ctm = fz_concat(p->gstate->pending.ctm, p->gstate->sent.ctm);
 		ctm = fz_concat(ctm, p->transform);
 		if (p->chain->op_q)
 			p->chain->op_q(ctx, p->chain);
-		p->filter->after_text_object(ctx, p->filter->opaque, p->doc, p->chain, ctm);
+		p->options->after_text_object(ctx, p->options->opaque, p->doc, p->chain, ctm);
 		if (p->chain->op_Q)
 			p->chain->op_Q(ctx, p->chain);
 	}
+}
+
+static void
+pdf_filter_Q(fz_context *ctx, pdf_processor *proc)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	filter_flush(ctx, p, FLUSH_TEXT);
+	if (p->in_BT)
+		pdf_filter_ET(ctx, proc);
+	filter_pop(ctx, p);
 }
 
 /* text state */
@@ -1351,7 +1880,11 @@ pdf_filter_ET(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_Tc(fz_context *ctx, pdf_processor *proc, float charspace)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	p->gstate->pending.text.char_space = charspace;
 }
@@ -1359,7 +1892,11 @@ pdf_filter_Tc(fz_context *ctx, pdf_processor *proc, float charspace)
 static void
 pdf_filter_Tw(fz_context *ctx, pdf_processor *proc, float wordspace)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	p->gstate->pending.text.word_space = wordspace;
 }
@@ -1369,7 +1906,11 @@ pdf_filter_Tz(fz_context *ctx, pdf_processor *proc, float scale)
 {
 	/* scale is as written in the file. It is 100 times smaller
 	 * in the gstate. */
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	p->gstate->pending.text.scale = scale / 100;
 }
@@ -1377,7 +1918,11 @@ pdf_filter_Tz(fz_context *ctx, pdf_processor *proc, float scale)
 static void
 pdf_filter_TL(fz_context *ctx, pdf_processor *proc, float leading)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	p->gstate->pending.text.leading = leading;
 }
@@ -1385,7 +1930,11 @@ pdf_filter_TL(fz_context *ctx, pdf_processor *proc, float leading)
 static void
 pdf_filter_Tf(fz_context *ctx, pdf_processor *proc, const char *name, pdf_font_desc *font, float size)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	fz_free(ctx, p->font_name);
 	p->font_name = NULL;
@@ -1399,7 +1948,11 @@ pdf_filter_Tf(fz_context *ctx, pdf_processor *proc, const char *name, pdf_font_d
 static void
 pdf_filter_Tr(fz_context *ctx, pdf_processor *proc, int render)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	p->gstate->pending.text.render = render;
 }
@@ -1407,7 +1960,11 @@ pdf_filter_Tr(fz_context *ctx, pdf_processor *proc, int render)
 static void
 pdf_filter_Ts(fz_context *ctx, pdf_processor *proc, float rise)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	p->gstate->pending.text.rise = rise;
 }
@@ -1417,35 +1974,56 @@ pdf_filter_Ts(fz_context *ctx, pdf_processor *proc, float rise)
 static void
 pdf_filter_Td(fz_context *ctx, pdf_processor *proc, float tx, float ty)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	p->Tm_adjust = 0;
 	pdf_tos_translate(&p->tos, tx, ty);
-	p->Tm_pending = 1;
+	if (p->Tm_pending)
+		return; /* Exit, just with Tm_pending */
+	if (p->Td_pending)
+		tx += p->Td_value.x, ty += p->Td_value.y;
+	p->Td_value.x = tx;
+	p->Td_value.y = ty;
+	p->Td_pending = 1;
 }
 
 static void
 pdf_filter_TD(fz_context *ctx, pdf_processor *proc, float tx, float ty)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
-	p->Tm_adjust = 0;
-	pdf_tos_translate(&p->tos, tx, ty);
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	p->gstate->pending.text.leading = -ty;
-	p->Tm_pending = 1;
+	pdf_filter_Td(ctx, proc, tx, ty);
 }
 
 static void
 pdf_filter_Tm(fz_context *ctx, pdf_processor *proc, float a, float b, float c, float d, float e, float f)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	pdf_tos_set_matrix(&p->tos, a, b, c, d, e, f);
 	p->Tm_pending = 1;
+	p->Td_pending = 0;
 	p->Tm_adjust = 0;
 }
 
 static void
 pdf_filter_Tstar(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	p->Tm_adjust = 0;
 	filter_flush(ctx, p, FLUSH_ALL);
 	pdf_tos_newline(&p->tos, p->gstate->pending.text.leading);
@@ -1461,14 +2039,22 @@ pdf_filter_Tstar(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_TJ(fz_context *ctx, pdf_processor *proc, pdf_obj *array)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_show_text(ctx, p, array);
 }
 
 static void
 pdf_filter_Tj(fz_context *ctx, pdf_processor *proc, char *str, size_t len)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_show_string(ctx, p, (unsigned char *)str, len);
 }
 
@@ -1476,7 +2062,10 @@ static void
 pdf_filter_squote(fz_context *ctx, pdf_processor *proc, char *str, size_t len)
 {
 	/* Note, we convert all T' operators to (maybe) a T* and a Tj */
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
 
 	/* need to flush text state and clear adjustment before we emit a newline */
 	p->Tm_adjust = 0;
@@ -1496,7 +2085,10 @@ pdf_filter_dquote(fz_context *ctx, pdf_processor *proc, float aw, float ac, char
 {
 	/* Note, we convert all T" operators to (maybe) a T*,
 	 * (maybe) Tc, (maybe) Tw and a Tj. */
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
 
 	/* need to flush text state and clear adjustment before we emit a newline */
 	p->Tm_adjust = 0;
@@ -1518,7 +2110,11 @@ pdf_filter_dquote(fz_context *ctx, pdf_processor *proc, float aw, float ac, char
 static void
 pdf_filter_d0(fz_context *ctx, pdf_processor *proc, float wx, float wy)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_d0)
 		p->chain->op_d0(ctx, p->chain, wx, wy);
@@ -1527,7 +2123,11 @@ pdf_filter_d0(fz_context *ctx, pdf_processor *proc, float wx, float wy)
 static void
 pdf_filter_d1(fz_context *ctx, pdf_processor *proc, float wx, float wy, float llx, float lly, float urx, float ury)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_d1)
 		p->chain->op_d1(ctx, p->chain, wx, wy, llx, lly, urx, ury);
@@ -1578,8 +2178,12 @@ set_default_cs_values(pdf_filter_gstate_sc *sc, const char *name, fz_colorspace 
 static void
 pdf_filter_CS(fz_context *ctx, pdf_processor *proc, const char *name, fz_colorspace *cs)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	fz_strlcpy(gstate->pending.CS.name, name, sizeof gstate->pending.CS.name);
 	gstate->pending.CS.cs = cs;
 	copy_resource(ctx, p, PDF_NAME(ColorSpace), name);
@@ -1589,8 +2193,12 @@ pdf_filter_CS(fz_context *ctx, pdf_processor *proc, const char *name, fz_colorsp
 static void
 pdf_filter_cs(fz_context *ctx, pdf_processor *proc, const char *name, fz_colorspace *cs)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	fz_strlcpy(gstate->pending.cs.name, name, sizeof gstate->pending.cs.name);
 	gstate->pending.cs.cs = cs;
 	copy_resource(ctx, p, PDF_NAME(ColorSpace), name);
@@ -1600,9 +2208,13 @@ pdf_filter_cs(fz_context *ctx, pdf_processor *proc, const char *name, fz_colorsp
 static void
 pdf_filter_SC_pattern(fz_context *ctx, pdf_processor *proc, const char *name, pdf_pattern *pat, int n, float *color)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
 	int i;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	fz_strlcpy(gstate->pending.SC.name, name, sizeof gstate->pending.SC.name);
 	gstate->pending.SC.pat = pat;
 	gstate->pending.SC.shd = NULL;
@@ -1615,9 +2227,13 @@ pdf_filter_SC_pattern(fz_context *ctx, pdf_processor *proc, const char *name, pd
 static void
 pdf_filter_sc_pattern(fz_context *ctx, pdf_processor *proc, const char *name, pdf_pattern *pat, int n, float *color)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
 	int i;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	fz_strlcpy(gstate->pending.sc.name, name, sizeof gstate->pending.sc.name);
 	gstate->pending.sc.pat = pat;
 	gstate->pending.sc.shd = NULL;
@@ -1630,8 +2246,12 @@ pdf_filter_sc_pattern(fz_context *ctx, pdf_processor *proc, const char *name, pd
 static void
 pdf_filter_SC_shade(fz_context *ctx, pdf_processor *proc, const char *name, fz_shade *shade)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	fz_strlcpy(gstate->pending.SC.name, name, sizeof gstate->pending.SC.name);
 	gstate->pending.SC.pat = NULL;
 	gstate->pending.SC.shd = shade;
@@ -1642,8 +2262,12 @@ pdf_filter_SC_shade(fz_context *ctx, pdf_processor *proc, const char *name, fz_s
 static void
 pdf_filter_sc_shade(fz_context *ctx, pdf_processor *proc, const char *name, fz_shade *shade)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	fz_strlcpy(gstate->pending.sc.name, name, sizeof gstate->pending.sc.name);
 	gstate->pending.sc.pat = NULL;
 	gstate->pending.sc.shd = shade;
@@ -1654,9 +2278,13 @@ pdf_filter_sc_shade(fz_context *ctx, pdf_processor *proc, const char *name, fz_s
 static void
 pdf_filter_SC_color(fz_context *ctx, pdf_processor *proc, int n, float *color)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
 	int i;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	gstate->pending.SC.name[0] = 0;
 	gstate->pending.SC.pat = NULL;
 	gstate->pending.SC.shd = NULL;
@@ -1668,9 +2296,13 @@ pdf_filter_SC_color(fz_context *ctx, pdf_processor *proc, int n, float *color)
 static void
 pdf_filter_sc_color(fz_context *ctx, pdf_processor *proc, int n, float *color)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gstate = gstate_to_update(ctx, p);
 	int i;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	gstate->pending.sc.name[0] = 0;
 	gstate->pending.sc.pat = NULL;
 	gstate->pending.sc.shd = NULL;
@@ -1682,7 +2314,12 @@ pdf_filter_sc_color(fz_context *ctx, pdf_processor *proc, int n, float *color)
 static void
 pdf_filter_G(fz_context *ctx, pdf_processor *proc, float g)
 {
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	float color[1] = { g };
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	pdf_filter_CS(ctx, proc, "DeviceGray", fz_device_gray(ctx));
 	pdf_filter_SC_color(ctx, proc, 1, color);
 }
@@ -1690,7 +2327,12 @@ pdf_filter_G(fz_context *ctx, pdf_processor *proc, float g)
 static void
 pdf_filter_g(fz_context *ctx, pdf_processor *proc, float g)
 {
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	float color[1] = { g };
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	pdf_filter_cs(ctx, proc, "DeviceGray", fz_device_gray(ctx));
 	pdf_filter_sc_color(ctx, proc, 1, color);
 }
@@ -1698,7 +2340,12 @@ pdf_filter_g(fz_context *ctx, pdf_processor *proc, float g)
 static void
 pdf_filter_RG(fz_context *ctx, pdf_processor *proc, float r, float g, float b)
 {
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	float color[3] = { r, g, b };
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	pdf_filter_CS(ctx, proc, "DeviceRGB", fz_device_rgb(ctx));
 	pdf_filter_SC_color(ctx, proc, 3, color);
 }
@@ -1706,7 +2353,12 @@ pdf_filter_RG(fz_context *ctx, pdf_processor *proc, float r, float g, float b)
 static void
 pdf_filter_rg(fz_context *ctx, pdf_processor *proc, float r, float g, float b)
 {
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	float color[3] = { r, g, b };
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	pdf_filter_cs(ctx, proc, "DeviceRGB", fz_device_rgb(ctx));
 	pdf_filter_sc_color(ctx, proc, 3, color);
 }
@@ -1714,7 +2366,12 @@ pdf_filter_rg(fz_context *ctx, pdf_processor *proc, float r, float g, float b)
 static void
 pdf_filter_K(fz_context *ctx, pdf_processor *proc, float c, float m, float y, float k)
 {
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	float color[4] = { c, m, y, k };
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	pdf_filter_CS(ctx, proc, "DeviceCMYK", fz_device_cmyk(ctx));
 	pdf_filter_SC_color(ctx, proc, 4, color);
 }
@@ -1722,7 +2379,12 @@ pdf_filter_K(fz_context *ctx, pdf_processor *proc, float c, float m, float y, fl
 static void
 pdf_filter_k(fz_context *ctx, pdf_processor *proc, float c, float m, float y, float k)
 {
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	float color[4] = { c, m, y, k };
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	pdf_filter_cs(ctx, proc, "DeviceCMYK", fz_device_cmyk(ctx));
 	pdf_filter_sc_color(ctx, proc, 4, color);
 }
@@ -1732,14 +2394,29 @@ pdf_filter_k(fz_context *ctx, pdf_processor *proc, float c, float m, float y, fl
 static void
 pdf_filter_BI(fz_context *ctx, pdf_processor *proc, fz_image *image, const char *colorspace)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_matrix ctm = fz_concat(p->gstate->pending.ctm, p->gstate->sent.ctm);
+		fz_rect r = { 0, 0, 1, 1 };
+		ctm = fz_concat(ctm, p->transform);
+		r = fz_transform_rect(r, ctm);
+
+		if (p->options->culler(ctx, p->options->opaque, r, FZ_CULL_IMAGE))
+			return;
+	}
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_BI)
 	{
-		if (p->filter->image_filter)
+		if (p->options->image_filter)
 		{
 			fz_matrix ctm = fz_concat(p->gstate->sent.ctm, p->transform);
-			image = p->filter->image_filter(ctx, p->filter->opaque, ctm, "<inline>", image);
+			image = p->options->image_filter(ctx, p->options->opaque, ctm, "<inline>", image);
 			if (image)
 			{
 				fz_try(ctx)
@@ -1760,7 +2437,23 @@ pdf_filter_BI(fz_context *ctx, pdf_processor *proc, fz_image *image, const char 
 static void
 pdf_filter_sh(fz_context *ctx, pdf_processor *proc, const char *name, fz_shade *shade)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_matrix ctm = fz_concat(p->gstate->pending.ctm, p->gstate->sent.ctm);
+		fz_rect r = { 0, 0, 1, 1 };
+		ctm = fz_concat(ctm, p->transform);
+		fz_bound_shade(ctx, shade, ctm);
+		r = fz_transform_rect(r, ctm);
+
+		if (p->options->culler(ctx, p->options->opaque, r, FZ_CULL_SHADING))
+			return;
+	}
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_sh)
 		p->chain->op_sh(ctx, p->chain, name, shade);
@@ -1770,15 +2463,30 @@ pdf_filter_sh(fz_context *ctx, pdf_processor *proc, const char *name, fz_shade *
 static void
 pdf_filter_Do_image(fz_context *ctx, pdf_processor *proc, const char *name, fz_image *image)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	fz_image *new_image;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
+	if (p->options->culler)
+	{
+		fz_matrix ctm = fz_concat(p->gstate->pending.ctm, p->gstate->sent.ctm);
+		fz_rect r = { 0, 0, 1, 1 };
+		ctm = fz_concat(ctm, p->transform);
+		r = fz_transform_rect(r, ctm);
+
+		if (p->options->culler(ctx, p->options->opaque, r, FZ_CULL_IMAGE))
+			return;
+	}
+
 	filter_flush(ctx, p, FLUSH_ALL);
 	if (p->chain->op_Do_image)
 	{
-		if (p->filter->image_filter)
+		if (p->options->image_filter)
 		{
 			fz_matrix ctm = fz_concat(p->gstate->sent.ctm, p->transform);
-			new_image = p->filter->image_filter(ctx, p->filter->opaque, ctm, name, image);
+			new_image = p->options->image_filter(ctx, p->options->opaque, ctm, name, image);
 		}
 		else
 		{
@@ -1787,11 +2495,11 @@ pdf_filter_Do_image(fz_context *ctx, pdf_processor *proc, const char *name, fz_i
 
 		if (new_image == image)
 		{
-			if (p->filter->instance_forms)
+			if (p->global_options->instance_forms)
 			{
 				/* Make up a unique name when instancing forms so we don't accidentally clash. */
 				char buf[40];
-				pdf_obj *obj = pdf_dict_gets(ctx, pdf_dict_get(ctx, p->old_rdb, PDF_NAME(XObject)), name);
+				pdf_obj *obj = pdf_dict_gets(ctx, pdf_dict_get(ctx, p->rstack->old_rdb, PDF_NAME(XObject)), name);
 				create_resource_name(ctx, p, PDF_NAME(XObject), "Im", buf, sizeof buf);
 				add_resource(ctx, p, PDF_NAME(XObject), buf, obj);
 				p->chain->op_Do_image(ctx, p->chain, buf, image);
@@ -1826,25 +2534,29 @@ pdf_filter_Do_image(fz_context *ctx, pdf_processor *proc, const char *name, fz_i
 }
 
 static void
-pdf_filter_Do_form(fz_context *ctx, pdf_processor *proc, const char *name, pdf_obj *xobj, pdf_obj *page_resources)
+pdf_filter_Do_form(fz_context *ctx, pdf_processor *proc, const char *name, pdf_obj *xobj)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	fz_matrix transform;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, FLUSH_ALL);
 
-	if (p->filter->instance_forms)
+	if (p->global_options->instance_forms)
 	{
 		/* Copy an instance of the form with a new unique name. */
 		pdf_obj *new_xobj;
 		char buf[40];
 		create_resource_name(ctx, p, PDF_NAME(XObject), "Fm", buf, sizeof buf);
 		transform = fz_concat(p->gstate->sent.ctm, p->transform);
-		new_xobj = pdf_filter_xobject_instance(ctx, xobj, page_resources, transform, p->filter, NULL);
+		new_xobj = pdf_filter_xobject_instance(ctx, xobj, p->rstack->new_rdb, transform, p->global_options, NULL);
 		fz_try(ctx)
 		{
 			add_resource(ctx, p, PDF_NAME(XObject), buf, new_xobj);
 			if (p->chain->op_Do_form)
-				p->chain->op_Do_form(ctx, p->chain, buf, new_xobj, page_resources);
+				p->chain->op_Do_form(ctx, p->chain, buf, new_xobj);
 		}
 		fz_always(ctx)
 			pdf_drop_obj(ctx, new_xobj);
@@ -1855,7 +2567,7 @@ pdf_filter_Do_form(fz_context *ctx, pdf_processor *proc, const char *name, pdf_o
 	{
 		copy_resource(ctx, p, PDF_NAME(XObject), name);
 		if (p->chain->op_Do_form)
-			p->chain->op_Do_form(ctx, p->chain, name, xobj, page_resources);
+			p->chain->op_Do_form(ctx, p->chain, name, xobj);
 	}
 }
 
@@ -1864,7 +2576,11 @@ pdf_filter_Do_form(fz_context *ctx, pdf_processor *proc, const char *name, pdf_o
 static void
 pdf_filter_MP(fz_context *ctx, pdf_processor *proc, const char *tag)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_MP)
 		p->chain->op_MP(ctx, p->chain, tag);
@@ -1873,7 +2589,11 @@ pdf_filter_MP(fz_context *ctx, pdf_processor *proc, const char *tag)
 static void
 pdf_filter_DP(fz_context *ctx, pdf_processor *proc, const char *tag, pdf_obj *raw, pdf_obj *cooked)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
+	if (p->gstate->empty_clip_region)
+		return;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_DP)
 		p->chain->op_DP(ctx, p->chain, tag, raw, cooked);
@@ -1885,7 +2605,7 @@ pdf_filter_BMC(fz_context *ctx, pdf_processor *proc, const char *tag)
 	/* Create a tag, and push it onto pending_tags. If it gets
 	 * flushed to the stream, it'll be moved from there onto
 	 * current_tags. */
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	tag_record *bmc = fz_malloc_struct(ctx, tag_record);
 
 	fz_try(ctx)
@@ -1905,7 +2625,7 @@ pdf_filter_BDC(fz_context *ctx, pdf_processor *proc, const char *tag, pdf_obj *r
 	/* Create a tag, and push it onto pending_tags. If it gets
 	 * flushed to the stream, it'll be moved from there onto
 	 * current_tags. */
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	tag_record *bdc = fz_malloc_struct(ctx, tag_record);
 	pdf_obj *mcid;
 	pdf_obj *str;
@@ -1944,7 +2664,7 @@ pdf_filter_BDC(fz_context *ctx, pdf_processor *proc, const char *tag, pdf_obj *r
 
 /* Bin the topmost (most recent) tag from a tag list. */
 static void
-pop_tag(fz_context *ctx, pdf_filter_processor *p, tag_record **tags)
+pop_tag(fz_context *ctx, pdf_sanitize_processor *p, tag_record **tags)
 {
 	tag_record *tag = *tags;
 
@@ -1966,7 +2686,7 @@ pop_tag(fz_context *ctx, pdf_filter_processor *p, tag_record **tags)
 static void
 pdf_filter_EMC(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 
 	/* If we have any pending tags, pop one of those. If not,
 	 * pop one of the current ones, and pass the EMC on. */
@@ -1987,7 +2707,8 @@ pdf_filter_EMC(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_BX(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_BX)
 		p->chain->op_BX(ctx, p->chain);
@@ -1996,7 +2717,8 @@ pdf_filter_BX(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_EX(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
+
 	filter_flush(ctx, p, 0);
 	if (p->chain->op_EX)
 		p->chain->op_EX(ctx, p->chain);
@@ -2005,26 +2727,27 @@ pdf_filter_EX(fz_context *ctx, pdf_processor *proc)
 static void
 pdf_filter_END(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_flush(ctx, p, FLUSH_TEXT);
 	if (p->chain->op_END)
 		p->chain->op_END(ctx, p->chain);
 }
 
 static void
-pdf_close_filter_processor(fz_context *ctx, pdf_processor *proc)
+pdf_close_sanitize_processor(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	while (!filter_pop(ctx, p))
 	{
 		/* Nothing to do in the loop, all work done above */
 	}
+	pdf_close_processor(ctx, p->chain);
 }
 
 static void
-pdf_drop_filter_processor(fz_context *ctx, pdf_processor *proc)
+pdf_drop_sanitize_processor(fz_context *ctx, pdf_processor *proc)
 {
-	pdf_filter_processor *p = (pdf_filter_processor*)proc;
+	pdf_sanitize_processor *p = (pdf_sanitize_processor*)proc;
 	filter_gstate *gs = p->gstate;
 	while (gs)
 	{
@@ -2041,162 +2764,219 @@ pdf_drop_filter_processor(fz_context *ctx, pdf_processor *proc)
 	pdf_drop_obj(ctx, p->structarray);
 	pdf_drop_document(ctx, p->doc);
 	fz_free(ctx, p->font_name);
+
+	fz_drop_path(ctx, p->path);
+
+	while (p->rstack)
+	{
+		resources_stack *stk = p->rstack;
+		p->rstack = stk->next;
+		pdf_drop_obj(ctx, stk->new_rdb);
+		pdf_drop_obj(ctx, stk->old_rdb);
+		fz_free(ctx, stk);
+	}
+}
+
+static void
+pdf_sanitize_push_resources(fz_context *ctx, pdf_processor *proc, pdf_obj *res)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)proc;
+	resources_stack *stk = fz_malloc_struct(ctx, resources_stack);
+
+	stk->next = p->rstack;
+	p->rstack = stk;
+	fz_try(ctx)
+	{
+		stk->old_rdb = pdf_keep_obj(ctx, res);
+		stk->new_rdb = pdf_new_dict(ctx, p->doc, 1);
+		pdf_processor_push_resources(ctx, p->chain, stk->new_rdb);
+	}
+	fz_catch(ctx)
+	{
+		pdf_drop_obj(ctx, stk->old_rdb);
+		pdf_drop_obj(ctx, stk->new_rdb);
+		p->rstack = stk->next;
+		fz_free(ctx, stk);
+		fz_rethrow(ctx);
+	}
+}
+
+static pdf_obj *
+pdf_sanitize_pop_resources(fz_context *ctx, pdf_processor *proc)
+{
+	pdf_sanitize_processor *p = (pdf_sanitize_processor *)proc;
+	resources_stack *stk = p->rstack;
+
+	p->rstack = stk->next;
+	pdf_drop_obj(ctx, stk->old_rdb);
+	pdf_drop_obj(ctx, stk->new_rdb);
+	fz_free(ctx, stk);
+
+	return pdf_processor_pop_resources(ctx, p->chain);
 }
 
 pdf_processor *
-pdf_new_filter_processor(
+pdf_new_sanitize_filter(
 	fz_context *ctx,
 	pdf_document *doc,
 	pdf_processor *chain,
-	pdf_obj *old_rdb,
-	pdf_obj *new_rdb,
 	int structparents,
 	fz_matrix transform,
-	pdf_filter_options *filter)
+	pdf_filter_options *options,
+	void *sopts_)
 {
-	pdf_filter_processor *proc = pdf_new_processor(ctx, sizeof *proc);
-	{
-		proc->super.close_processor = pdf_close_filter_processor;
-		proc->super.drop_processor = pdf_drop_filter_processor;
+	pdf_sanitize_processor *proc = pdf_new_processor(ctx, sizeof *proc);
+	pdf_sanitize_filter_options *sopts = (pdf_sanitize_filter_options *)sopts_;
 
-		/* general graphics state */
-		proc->super.op_w = pdf_filter_w;
-		proc->super.op_j = pdf_filter_j;
-		proc->super.op_J = pdf_filter_J;
-		proc->super.op_M = pdf_filter_M;
-		proc->super.op_d = pdf_filter_d;
-		proc->super.op_ri = pdf_filter_ri;
-		proc->super.op_i = pdf_filter_i;
-		proc->super.op_gs_begin = pdf_filter_gs_begin;
-		proc->super.op_gs_end = pdf_filter_gs_end;
+	proc->super.close_processor = pdf_close_sanitize_processor;
+	proc->super.drop_processor = pdf_drop_sanitize_processor;
 
-		/* transparency graphics state */
-		proc->super.op_gs_BM = pdf_filter_gs_BM;
-		proc->super.op_gs_CA = pdf_filter_gs_CA;
-		proc->super.op_gs_ca = pdf_filter_gs_ca;
-		proc->super.op_gs_SMask = pdf_filter_gs_SMask;
+	proc->super.push_resources = pdf_sanitize_push_resources;
+	proc->super.pop_resources = pdf_sanitize_pop_resources;
 
-		/* special graphics state */
-		proc->super.op_q = pdf_filter_q;
-		proc->super.op_Q = pdf_filter_Q;
-		proc->super.op_cm = pdf_filter_cm;
+	/* general graphics state */
+	proc->super.op_w = pdf_filter_w;
+	proc->super.op_j = pdf_filter_j;
+	proc->super.op_J = pdf_filter_J;
+	proc->super.op_M = pdf_filter_M;
+	proc->super.op_d = pdf_filter_d;
+	proc->super.op_ri = pdf_filter_ri;
+	proc->super.op_i = pdf_filter_i;
+	proc->super.op_gs_begin = pdf_filter_gs_begin;
+	proc->super.op_gs_end = pdf_filter_gs_end;
 
-		/* path construction */
-		proc->super.op_m = pdf_filter_m;
-		proc->super.op_l = pdf_filter_l;
-		proc->super.op_c = pdf_filter_c;
-		proc->super.op_v = pdf_filter_v;
-		proc->super.op_y = pdf_filter_y;
-		proc->super.op_h = pdf_filter_h;
-		proc->super.op_re = pdf_filter_re;
+	/* transparency graphics state */
+	proc->super.op_gs_BM = pdf_filter_gs_BM;
+	proc->super.op_gs_CA = pdf_filter_gs_CA;
+	proc->super.op_gs_ca = pdf_filter_gs_ca;
+	proc->super.op_gs_SMask = pdf_filter_gs_SMask;
 
-		/* path painting */
-		proc->super.op_S = pdf_filter_S;
-		proc->super.op_s = pdf_filter_s;
-		proc->super.op_F = pdf_filter_F;
-		proc->super.op_f = pdf_filter_f;
-		proc->super.op_fstar = pdf_filter_fstar;
-		proc->super.op_B = pdf_filter_B;
-		proc->super.op_Bstar = pdf_filter_Bstar;
-		proc->super.op_b = pdf_filter_b;
-		proc->super.op_bstar = pdf_filter_bstar;
-		proc->super.op_n = pdf_filter_n;
+	/* special graphics state */
+	proc->super.op_q = pdf_filter_q;
+	proc->super.op_Q = pdf_filter_Q;
+	proc->super.op_cm = pdf_filter_cm;
 
-		/* clipping paths */
-		proc->super.op_W = pdf_filter_W;
-		proc->super.op_Wstar = pdf_filter_Wstar;
+	/* path construction */
+	proc->super.op_m = pdf_filter_m;
+	proc->super.op_l = pdf_filter_l;
+	proc->super.op_c = pdf_filter_c;
+	proc->super.op_v = pdf_filter_v;
+	proc->super.op_y = pdf_filter_y;
+	proc->super.op_h = pdf_filter_h;
+	proc->super.op_re = pdf_filter_re;
 
-		/* text objects */
-		proc->super.op_BT = pdf_filter_BT;
-		proc->super.op_ET = pdf_filter_ET;
+	/* path painting */
+	proc->super.op_S = pdf_filter_S;
+	proc->super.op_s = pdf_filter_s;
+	proc->super.op_F = pdf_filter_F;
+	proc->super.op_f = pdf_filter_f;
+	proc->super.op_fstar = pdf_filter_fstar;
+	proc->super.op_B = pdf_filter_B;
+	proc->super.op_Bstar = pdf_filter_Bstar;
+	proc->super.op_b = pdf_filter_b;
+	proc->super.op_bstar = pdf_filter_bstar;
+	proc->super.op_n = pdf_filter_n;
 
-		/* text state */
-		proc->super.op_Tc = pdf_filter_Tc;
-		proc->super.op_Tw = pdf_filter_Tw;
-		proc->super.op_Tz = pdf_filter_Tz;
-		proc->super.op_TL = pdf_filter_TL;
-		proc->super.op_Tf = pdf_filter_Tf;
-		proc->super.op_Tr = pdf_filter_Tr;
-		proc->super.op_Ts = pdf_filter_Ts;
+	/* clipping paths */
+	proc->super.op_W = pdf_filter_W;
+	proc->super.op_Wstar = pdf_filter_Wstar;
 
-		/* text positioning */
-		proc->super.op_Td = pdf_filter_Td;
-		proc->super.op_TD = pdf_filter_TD;
-		proc->super.op_Tm = pdf_filter_Tm;
-		proc->super.op_Tstar = pdf_filter_Tstar;
+	/* text objects */
+	proc->super.op_BT = pdf_filter_BT;
+	proc->super.op_ET = pdf_filter_ET;
 
-		/* text showing */
-		proc->super.op_TJ = pdf_filter_TJ;
-		proc->super.op_Tj = pdf_filter_Tj;
-		proc->super.op_squote = pdf_filter_squote;
-		proc->super.op_dquote = pdf_filter_dquote;
+	/* text state */
+	proc->super.op_Tc = pdf_filter_Tc;
+	proc->super.op_Tw = pdf_filter_Tw;
+	proc->super.op_Tz = pdf_filter_Tz;
+	proc->super.op_TL = pdf_filter_TL;
+	proc->super.op_Tf = pdf_filter_Tf;
+	proc->super.op_Tr = pdf_filter_Tr;
+	proc->super.op_Ts = pdf_filter_Ts;
 
-		/* type 3 fonts */
-		proc->super.op_d0 = pdf_filter_d0;
-		proc->super.op_d1 = pdf_filter_d1;
+	/* text positioning */
+	proc->super.op_Td = pdf_filter_Td;
+	proc->super.op_TD = pdf_filter_TD;
+	proc->super.op_Tm = pdf_filter_Tm;
+	proc->super.op_Tstar = pdf_filter_Tstar;
 
-		/* color */
-		proc->super.op_CS = pdf_filter_CS;
-		proc->super.op_cs = pdf_filter_cs;
-		proc->super.op_SC_color = pdf_filter_SC_color;
-		proc->super.op_sc_color = pdf_filter_sc_color;
-		proc->super.op_SC_pattern = pdf_filter_SC_pattern;
-		proc->super.op_sc_pattern = pdf_filter_sc_pattern;
-		proc->super.op_SC_shade = pdf_filter_SC_shade;
-		proc->super.op_sc_shade = pdf_filter_sc_shade;
+	/* text showing */
+	proc->super.op_TJ = pdf_filter_TJ;
+	proc->super.op_Tj = pdf_filter_Tj;
+	proc->super.op_squote = pdf_filter_squote;
+	proc->super.op_dquote = pdf_filter_dquote;
 
-		proc->super.op_G = pdf_filter_G;
-		proc->super.op_g = pdf_filter_g;
-		proc->super.op_RG = pdf_filter_RG;
-		proc->super.op_rg = pdf_filter_rg;
-		proc->super.op_K = pdf_filter_K;
-		proc->super.op_k = pdf_filter_k;
+	/* type 3 fonts */
+	proc->super.op_d0 = pdf_filter_d0;
+	proc->super.op_d1 = pdf_filter_d1;
 
-		/* shadings, images, xobjects */
-		proc->super.op_BI = pdf_filter_BI;
-		proc->super.op_sh = pdf_filter_sh;
-		proc->super.op_Do_image = pdf_filter_Do_image;
-		proc->super.op_Do_form = pdf_filter_Do_form;
+	/* color */
+	proc->super.op_CS = pdf_filter_CS;
+	proc->super.op_cs = pdf_filter_cs;
+	proc->super.op_SC_color = pdf_filter_SC_color;
+	proc->super.op_sc_color = pdf_filter_sc_color;
+	proc->super.op_SC_pattern = pdf_filter_SC_pattern;
+	proc->super.op_sc_pattern = pdf_filter_sc_pattern;
+	proc->super.op_SC_shade = pdf_filter_SC_shade;
+	proc->super.op_sc_shade = pdf_filter_sc_shade;
 
-		/* marked content */
-		proc->super.op_MP = pdf_filter_MP;
-		proc->super.op_DP = pdf_filter_DP;
-		proc->super.op_BMC = pdf_filter_BMC;
-		proc->super.op_BDC = pdf_filter_BDC;
-		proc->super.op_EMC = pdf_filter_EMC;
+	proc->super.op_G = pdf_filter_G;
+	proc->super.op_g = pdf_filter_g;
+	proc->super.op_RG = pdf_filter_RG;
+	proc->super.op_rg = pdf_filter_rg;
+	proc->super.op_K = pdf_filter_K;
+	proc->super.op_k = pdf_filter_k;
 
-		/* compatibility */
-		proc->super.op_BX = pdf_filter_BX;
-		proc->super.op_EX = pdf_filter_EX;
+	/* shadings, images, xobjects */
+	proc->super.op_BI = pdf_filter_BI;
+	proc->super.op_sh = pdf_filter_sh;
+	proc->super.op_Do_image = pdf_filter_Do_image;
+	proc->super.op_Do_form = pdf_filter_Do_form;
 
-		/* extgstate */
-		proc->super.op_gs_OP = pdf_filter_gs_OP;
-		proc->super.op_gs_op = pdf_filter_gs_op;
-		proc->super.op_gs_OPM = pdf_filter_gs_OPM;
-		proc->super.op_gs_UseBlackPtComp = pdf_filter_gs_UseBlackPtComp;
+	/* marked content */
+	proc->super.op_MP = pdf_filter_MP;
+	proc->super.op_DP = pdf_filter_DP;
+	proc->super.op_BMC = pdf_filter_BMC;
+	proc->super.op_BDC = pdf_filter_BDC;
+	proc->super.op_EMC = pdf_filter_EMC;
 
-		proc->super.op_END = pdf_filter_END;
-	}
+	/* compatibility */
+	proc->super.op_BX = pdf_filter_BX;
+	proc->super.op_EX = pdf_filter_EX;
+
+	/* extgstate */
+	proc->super.op_gs_OP = pdf_filter_gs_OP;
+	proc->super.op_gs_op = pdf_filter_gs_op;
+	proc->super.op_gs_OPM = pdf_filter_gs_OPM;
+	proc->super.op_gs_UseBlackPtComp = pdf_filter_gs_UseBlackPtComp;
+
+	proc->super.op_END = pdf_filter_END;
 
 	proc->doc = pdf_keep_document(ctx, doc);
 	proc->structparents = structparents;
 	if (structparents != -1)
 		proc->structarray = pdf_keep_obj(ctx, pdf_lookup_number(ctx, pdf_dict_getp(ctx, pdf_trailer(ctx, doc), "Root/StructTreeRoot/ParentTree"), structparents));
 	proc->chain = chain;
-	proc->old_rdb = old_rdb;
-	proc->new_rdb = new_rdb;
-	proc->filter = filter;
+	proc->global_options = options;
+	proc->options = sopts;
 	proc->transform = transform;
+	proc->path = NULL;
 
 	fz_try(ctx)
 	{
+		if (proc->options->culler)
+			proc->path = fz_new_path(ctx);
 		proc->gstate = fz_malloc_struct(ctx, filter_gstate);
 		proc->gstate->pending.ctm = fz_identity;
 		proc->gstate->sent.ctm = fz_identity;
 		proc->gstate->pending.text.scale = 1;
 		proc->gstate->pending.text.size = -1;
+		proc->gstate->pending.stroke.linewidth = 1;
+		proc->gstate->pending.stroke.miterlimit = 10;
 		proc->gstate->sent.text.scale = 1;
 		proc->gstate->sent.text.size = -1;
+		proc->gstate->sent.stroke.linewidth = 1;
+		proc->gstate->sent.stroke.miterlimit = 10;
 	}
 	fz_catch(ctx)
 	{

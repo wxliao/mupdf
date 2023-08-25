@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -346,6 +346,8 @@ pbm_write_header(fz_context *ctx, fz_band_writer *writer, fz_colorspace *cs)
 
 	if (writer->s != 0)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "pbms cannot contain spot colors");
+	if (writer->n != 1)
+		fz_throw(ctx, FZ_ERROR_GENERIC, "too many color components in bitmap");
 
 	fz_write_printf(ctx, out, "P4\n%d %d\n", w, h);
 }
@@ -359,6 +361,8 @@ pkm_write_header(fz_context *ctx, fz_band_writer *writer, fz_colorspace *cs)
 
 	if (writer->s != 0)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "pkms cannot contain spot colors");
+	if (writer->n != 4)
+		fz_throw(ctx, FZ_ERROR_GENERIC, "wrong number of color components in bitmap");
 
 	fz_write_printf(ctx, out, "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE CMYK\nENDHDR\n", w, h);
 }
@@ -411,12 +415,8 @@ pbm_write_band(fz_context *ctx, fz_band_writer *writer, int stride, int band_sta
 	fz_output *out = writer->out;
 	int w = writer->w;
 	int h = writer->h;
-	int n = writer->n;
 	int bytestride;
 	int end = band_start + band_height;
-
-	if (n != 1)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "too many color components in bitmap");
 
 	if (end > h)
 		end = h;
@@ -436,12 +436,9 @@ pkm_write_band(fz_context *ctx, fz_band_writer *writer, int stride, int band_sta
 	fz_output *out = writer->out;
 	int w = writer->w;
 	int h = writer->h;
-	int n = writer->n;
 	int bytestride;
 	int end = band_start + band_height;
 
-	if (n != 4)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "wrong number of color components in bitmap");
 
 	if (end > h)
 		end = h;

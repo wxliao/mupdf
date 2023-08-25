@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
@@ -82,9 +82,14 @@ static int dest_is_valid(fz_context *ctx, pdf_obj *o, int page_count, int *page_
 	pdf_obj *p;
 
 	p = pdf_dict_get(ctx, o, PDF_NAME(A));
-	if (pdf_name_eq(ctx, pdf_dict_get(ctx, p, PDF_NAME(S)), PDF_NAME(GoTo)) &&
-		!string_in_names_list(ctx, pdf_dict_get(ctx, p, PDF_NAME(D)), names_list))
-		return 0;
+	if (pdf_name_eq(ctx, pdf_dict_get(ctx, p, PDF_NAME(S)), PDF_NAME(GoTo)))
+	{
+		pdf_obj *d = pdf_dict_get(ctx, p, PDF_NAME(D));
+		if (pdf_is_array(ctx, d) && !dest_is_valid_page(ctx, pdf_array_get(ctx, d, 0), page_object_nums, page_count))
+			return 0;
+		else if (pdf_is_string(ctx, d) && !string_in_names_list(ctx, d, names_list))
+			return 0;
+	}
 
 	p = pdf_dict_get(ctx, o, PDF_NAME(Dest));
 	if (p == NULL)
@@ -95,6 +100,39 @@ static int dest_is_valid(fz_context *ctx, pdf_obj *o, int page_count, int *page_
 		return 0;
 
 	return 1;
+}
+
+static int strip_stale_annot_refs(fz_context *ctx, pdf_obj *field, int page_count, int *page_object_nums)
+{
+	pdf_obj *kids = pdf_dict_get(ctx, field, PDF_NAME(Kids));
+	int len = pdf_array_len(ctx, kids);
+	int j;
+
+	if (kids)
+	{
+		for (j = 0; j < len; j++)
+		{
+			if (strip_stale_annot_refs(ctx, pdf_array_get(ctx, kids, j), page_count, page_object_nums))
+			{
+				pdf_array_delete(ctx, kids, j);
+				len--;
+				j--;
+			}
+		}
+
+		return pdf_array_len(ctx, kids) == 0;
+	}
+	else
+	{
+		pdf_obj *page = pdf_dict_get(ctx, field, PDF_NAME(P));
+		int page_num = pdf_to_num(ctx, page);
+
+		for (j = 0; j < page_count; j++)
+			if (page_num == page_object_nums[j])
+				return 0;
+
+		return 1;
+	}
 }
 
 static int strip_outlines(fz_context *ctx, pdf_document *doc, pdf_obj *outlines, int page_count, int *page_object_nums, pdf_obj *names_list);
@@ -203,6 +241,7 @@ static void retainpages(fz_context *ctx, globals *glo, int argc, char **argv)
 	pdf_obj *names_list = NULL;
 	pdf_obj *outlines;
 	pdf_obj *ocproperties;
+	pdf_obj *allfields;
 	int pagecount;
 	int i;
 	int *page_object_nums;
@@ -325,12 +364,55 @@ static void retainpages(fz_context *ctx, globals *glo, int argc, char **argv)
 		}
 	}
 
+	/* Locate all fields on retained pages */
+	allfields = pdf_new_array(ctx, doc, 1);
+	for (i = 0; i < pagecount; i++)
+	{
+		pdf_obj *pageref = pdf_lookup_page_obj(ctx, doc, i);
+
+		pdf_obj *annots = pdf_dict_get(ctx, pageref, PDF_NAME(Annots));
+
+		int len = pdf_array_len(ctx, annots);
+		int j;
+
+		for (j = 0; j < len; j++)
+		{
+			pdf_obj *f = pdf_array_get(ctx, annots, j);
+
+			if (pdf_dict_get(ctx, f, PDF_NAME(Subtype)) == PDF_NAME(Widget))
+				pdf_array_push(ctx, allfields, f);
+		}
+	}
+
+	/* From non-terminal widget fields, strip out annot references not
+	 * belonging to any retained page. */
+	for (i = 0; i < pdf_array_len(ctx, allfields); i++)
+	{
+		pdf_obj *f = pdf_array_get(ctx, allfields, i);
+
+		while (pdf_dict_get(ctx, f, PDF_NAME(Parent)))
+			f = pdf_dict_get(ctx, f, PDF_NAME(Parent));
+
+		strip_stale_annot_refs(ctx, f, pagecount, page_object_nums);
+	}
+
+	/* For terminal fields, if action destination is not valid,
+	 * remove the action */
+	for (i = 0; i < pdf_array_len(ctx, allfields); i++)
+	{
+		pdf_obj *f = pdf_array_get(ctx, allfields, i);
+
+		if (!dest_is_valid(ctx, f, pagecount, page_object_nums, names_list))
+			pdf_dict_del(ctx, f, PDF_NAME(A));
+	}
+
 	if (strip_outlines(ctx, doc, outlines, pagecount, page_object_nums, names_list) == 0)
 	{
 		pdf_dict_del(ctx, root, PDF_NAME(Outlines));
 	}
 
 	fz_free(ctx, page_object_nums);
+	pdf_drop_obj(ctx, allfields);
 	pdf_drop_obj(ctx, names_list);
 	pdf_drop_obj(ctx, root);
 }

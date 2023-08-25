@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -88,6 +88,11 @@ fz_jpg_mem_term(j_common_ptr cinfo)
 }
 
 #endif /* SHARE_JPEG */
+
+static void output_message(j_common_ptr cinfo)
+{
+	/* swallow message */
+}
 
 static void error_exit(j_common_ptr cinfo)
 {
@@ -345,6 +350,13 @@ static int extract_app13_resolution(jpeg_saved_marker_ptr marker, int *xres, int
 	return 0;
 }
 
+static void invert_cmyk(unsigned char *p, int n)
+{
+	int i;
+	for (i = 0; i < n; ++i)
+		p[i] = 255 - p[i];
+}
+
 fz_pixmap *
 fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 {
@@ -367,6 +379,7 @@ fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 	cinfo.mem = NULL;
 	cinfo.global_state = 0;
 	cinfo.err = jpeg_std_error(&err);
+	err.output_message = output_message;
 	err.error_exit = error_exit;
 
 	cinfo.client_data = NULL;
@@ -387,6 +400,7 @@ fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 
 		jpeg_save_markers(&cinfo, JPEG_APP0+1, 0xffff);
 		jpeg_save_markers(&cinfo, JPEG_APP0+13, 0xffff);
+		jpeg_save_markers(&cinfo, JPEG_APP0+2, 0xffff);
 
 		jpeg_read_header(&cinfo, 1);
 
@@ -430,6 +444,11 @@ fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 		while (cinfo.output_scanline < cinfo.output_height)
 		{
 			jpeg_read_scanlines(&cinfo, row, 1);
+
+			// Invert CMYK polarity for some CMYK images (see comment in filter-dct for details).
+			if (cinfo.out_color_space == JCS_CMYK && cinfo.Adobe_transform == 2)
+				invert_cmyk(row[0], image->stride);
+
 			sp = row[0];
 			for (x = 0; x < cinfo.output_width; x++)
 			{

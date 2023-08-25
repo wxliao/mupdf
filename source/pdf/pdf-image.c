@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
@@ -99,10 +99,10 @@ pdf_load_image_imp(fz_context *ctx, pdf_document *doc, pdf_obj *rdb, pdf_obj *di
 		fz_throw(ctx, FZ_ERROR_GENERIC, "image depth is zero (or less)");
 	if (bpc > 16)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "image depth is too large: %d", bpc);
-	if (w > (1 << 16))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "image is too wide");
-	if (h > (1 << 16))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "image is too high");
+	if (SIZE_MAX / w < (size_t)(bpc+7)/8)
+		fz_throw(ctx, FZ_ERROR_GENERIC, "image is too large");
+	if (SIZE_MAX / h < w * (size_t)((bpc+7)/8))
+		fz_throw(ctx, FZ_ERROR_GENERIC, "image is too large");
 
 	fz_var(mask);
 	fz_var(image);
@@ -130,6 +130,9 @@ pdf_load_image_imp(fz_context *ctx, pdf_document *doc, pdf_obj *rdb, pdf_obj *di
 		{
 			n = 1;
 		}
+
+		if (SIZE_MAX / n < h * ((size_t)w) * ((bpc+7)/8))
+			fz_throw(ctx, FZ_ERROR_GENERIC, "image is too large");
 
 		obj = pdf_dict_geta(ctx, dict, PDF_NAME(Decode), PDF_NAME(D));
 		if (obj)
@@ -191,16 +194,18 @@ pdf_load_image_imp(fz_context *ctx, pdf_document *doc, pdf_obj *rdb, pdf_obj *di
 		if (cstm == NULL)
 		{
 			/* Just load the compressed image data now and we can decode it on demand. */
-			buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict));
+			size_t worst_case = w * (size_t)h;
+			worst_case = (worst_case * bpc + 7) >> 3;
+			if (colorspace)
+				worst_case *= colorspace->n;
+			buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict), worst_case);
 			image = fz_new_image_from_compressed_buffer(ctx, w, h, bpc, colorspace, 96, 96, interpolate, imagemask, decode, use_colorkey ? colorkey : NULL, buffer, mask);
-			image->invert_cmyk_jpeg = 0;
 		}
 		else
 		{
 			/* Inline stream */
 			stride = (w * n * bpc + 7) / 8;
 			image = fz_new_image_from_compressed_buffer(ctx, w, h, bpc, colorspace, 96, 96, interpolate, imagemask, decode, use_colorkey ? colorkey : NULL, NULL, mask);
-			image->invert_cmyk_jpeg = 0;
 			pdf_load_compressed_inline_image(ctx, doc, dict, stride * h, cstm, indexed, (fz_compressed_image *)image);
 		}
 	}
@@ -301,6 +306,7 @@ pdf_load_jpx(fz_context *ctx, pdf_document *doc, pdf_obj *dict, int forcemask)
 	}
 	fz_catch(ctx)
 	{
+		fz_morph_error(ctx, FZ_ERROR_GENERIC, FZ_ERROR_MINOR);
 		fz_rethrow(ctx);
 	}
 
@@ -527,18 +533,21 @@ pdf_add_image(fz_context *ctx, pdf_document *doc, fz_image *image)
 	fz_image *smask_image = NULL;
 	int i, n;
 
-	/* If we can maintain compression, do so */
-	cbuffer = fz_compressed_image_buffer(ctx, image);
-
 	fz_var(pixmap);
 	fz_var(buffer);
 	fz_var(imobj);
 	fz_var(smask_pixmap);
 	fz_var(smask_image);
 
-	imobj = pdf_add_new_dict(ctx, doc, 3);
+	pdf_begin_operation(ctx, doc, "Add image");
+
 	fz_try(ctx)
 	{
+		/* If we can maintain compression, do so */
+		cbuffer = fz_compressed_image_buffer(ctx, image);
+
+		imobj = pdf_add_new_dict(ctx, doc, 3);
+
 		dp = pdf_dict_put_dict(ctx, imobj, PDF_NAME(DecodeParms), 3);
 		pdf_dict_put(ctx, imobj, PDF_NAME(Type), PDF_NAME(XObject));
 		pdf_dict_put(ctx, imobj, PDF_NAME(Subtype), PDF_NAME(Image));
@@ -553,7 +562,7 @@ pdf_add_image(fz_context *ctx, pdf_document *doc, fz_image *image)
 			case FZ_IMAGE_RAW:
 				break;
 			case FZ_IMAGE_JPEG:
-				if (cp->u.jpeg.color_transform != -1)
+				if (cp->u.jpeg.color_transform >= 0)
 					pdf_dict_put_int(ctx, dp, PDF_NAME(ColorTransform), cp->u.jpeg.color_transform);
 				pdf_dict_put(ctx, imobj, PDF_NAME(Filter), PDF_NAME(DCTDecode));
 				break;
@@ -821,6 +830,7 @@ unknown_compression:
 		}
 
 		pdf_update_stream(ctx, doc, imobj, buffer, 1);
+		pdf_end_operation(ctx, doc);
 	}
 	fz_always(ctx)
 	{
@@ -832,6 +842,7 @@ unknown_compression:
 	fz_catch(ctx)
 	{
 		pdf_drop_obj(ctx, imobj);
+		pdf_abandon_operation(ctx, doc);
 		fz_rethrow(ctx);
 	}
 	return imobj;

@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2022 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -173,12 +173,15 @@ png_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "PNGs cannot contain spot colors");
 	if (fz_colorspace_type(ctx, cs) == FZ_COLORSPACE_BGR)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "pixmap can not be bgr");
+	if (cs && !fz_colorspace_is_gray(ctx, cs) && !fz_colorspace_is_rgb(ctx, cs))
+		fz_throw(ctx, FZ_ERROR_GENERIC, "pixmap must be grayscale or rgb to write as png");
 
 	/* Treat alpha only as greyscale */
 	if (n == 1 && alpha)
 		alpha = 0;
+	n -= alpha;
 
-	switch (n - alpha)
+	switch (n)
 	{
 	case 1: color = (alpha ? 4 : 0); break; /* 0 = Greyscale, 4 = Greyscale + Alpha */
 	case 3: color = (alpha ? 6 : 2); break; /* 2 = RGB, 6 = RGBA */
@@ -236,21 +239,21 @@ png_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_st
 		if (usize > SIZE_MAX / band_height)
 			fz_throw(ctx, FZ_ERROR_GENERIC, "png data too large.");
 		usize *= band_height;
-		writer->usize = usize;
-		/* Now figure out how large a buffer we need to compress into.
-		 * deflateBound always expands a bit, and it's limited by being
-		 * a uLong rather than a size_t. */
-		writer->csize = writer->usize >= UINT32_MAX ? UINT32_MAX : deflateBound(&writer->stream, writer->usize);
-		if (writer->csize < writer->usize || writer->csize > UINT32_MAX) /* Check for overflow */
-			writer->csize = UINT32_MAX;
-		writer->udata = Memento_label(fz_malloc(ctx, writer->usize), "png_write_udata");
-		writer->cdata = Memento_label(fz_malloc(ctx, writer->csize), "png_write_cdata");
 		writer->stream.opaque = ctx;
 		writer->stream.zalloc = fz_zlib_alloc;
 		writer->stream.zfree = fz_zlib_free;
 		err = deflateInit(&writer->stream, Z_DEFAULT_COMPRESSION);
 		if (err != Z_OK)
 			fz_throw(ctx, FZ_ERROR_GENERIC, "compression error %d", err);
+		writer->usize = usize;
+		/* Now figure out how large a buffer we need to compress into.
+		 * deflateBound always expands a bit, and it's limited by being
+		 * a uLong rather than a size_t. */
+		writer->csize = writer->usize >= UINT32_MAX ? UINT32_MAX : deflateBound(&writer->stream, (uLong)writer->usize);
+		if (writer->csize < writer->usize || writer->csize > UINT32_MAX) /* Check for overflow */
+			writer->csize = UINT32_MAX;
+		writer->udata = Memento_label(fz_malloc(ctx, writer->usize), "png_write_udata");
+		writer->cdata = Memento_label(fz_malloc(ctx, writer->csize), "png_write_cdata");
 	}
 
 	dp = writer->udata;
@@ -260,24 +263,13 @@ png_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_st
 		/* Unpremultiply data */
 		for (y = 0; y < band_height; y++)
 		{
-			int prev[FZ_MAX_COLORS];
-			*dp++ = 1; /* sub prediction filter */
+			*dp++ = 0; /* none prediction filter */
 			for (x = 0; x < w; x++)
 			{
 				int a = sp[n-1];
 				int inva = a ? 256*255/a : 0;
-				int p;
 				for (k = 0; k < n-1; k++)
-				{
-					int v = (sp[k] * inva + 128)>>8;
-					p = x ? prev[k] : 0;
-					prev[k] = v;
-					v -= p;
-					dp[k] = v;
-				}
-				p = x ? prev[k] : 0;
-				prev[k] = a;
-				a -= p;
+					dp[k] = (sp[k] * inva + 128)>>8;
 				dp[k] = a;
 				sp += n;
 				dp += n;
@@ -289,16 +281,11 @@ png_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_st
 	{
 		for (y = 0; y < band_height; y++)
 		{
-			*dp++ = 1; /* sub prediction filter */
+			*dp++ = 0; /* none prediction filter */
 			for (x = 0; x < w; x++)
 			{
 				for (k = 0; k < n; k++)
-				{
-					if (x == 0)
-						dp[k] = sp[k];
-					else
-						dp[k] = sp[k] - sp[k-n];
-				}
+					dp[k] = sp[k];
 				sp += n;
 				dp += n;
 			}
@@ -314,7 +301,7 @@ png_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_st
 		size_t eaten;
 
 		writer->stream.next_in = dp;
-		writer->stream.avail_in = remain <= UINT32_MAX ? remain : UINT32_MAX;
+		writer->stream.avail_in = (uInt)(remain <= UINT32_MAX ? remain : UINT32_MAX);
 		writer->stream.next_out = writer->cdata;
 		writer->stream.avail_out = writer->csize <= UINT32_MAX ? (uInt)writer->csize : UINT32_MAX;
 

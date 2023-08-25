@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2022 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "xml-imp.h"
 
@@ -115,6 +115,9 @@ static void xml_indent(int n)
 void fz_debug_xml(fz_xml *item, int level)
 {
 	char *s;
+
+	if (item == NULL)
+		return;
 
 	/* Skip over the DOC object at the top. */
 	if (item->up == NULL)
@@ -215,7 +218,7 @@ char *fz_xml_tag(fz_xml *item)
 {
 	/* DOC items can never have MAGIC_TEXT as their down value,
 	 * so this is safe. */
-	return item && !FZ_TEXT_ITEM(item) && item->u.node.u.d.name[0] ? item->u.node.u.d.name : NULL;
+	return item && !FZ_TEXT_ITEM(item) ? item->u.node.u.d.name : NULL;
 }
 
 int fz_xml_is_tag(fz_xml *item, const char *name)
@@ -503,6 +506,17 @@ static void xml_emit_att_name(fz_context *ctx, struct parser *parser, const char
 	head->u.node.u.d.atts = att;
 }
 
+void fz_xml_add_att(fz_context *ctx, fz_pool *pool, fz_xml *node, const char *key, const char *val)
+{
+	size_t size = offsetof(struct attribute, name) + strlen(key) + 1;
+	struct attribute *att = fz_pool_alloc(ctx, pool, size);
+	memcpy(att->name, key, strlen(key)+1);
+	att->value = fz_pool_alloc(ctx, pool, strlen(val) + 1);
+	memcpy(att->value, val, strlen(val)+1);
+	att->next = node->u.node.u.d.atts;
+	node->u.node.u.d.atts = att;
+}
+
 static void xml_emit_att_value(fz_context *ctx, struct parser *parser, const char *a, const char *b)
 {
 	fz_xml *head = parser->head;
@@ -682,6 +696,8 @@ parse_closing_element:
 	while (iswhite(*p)) ++p;
 	mark = p;
 	while (isname(*p)) ++p;
+	if (!isname(*mark))
+		return "syntax error in closing element";
 	if (close_tag(ctx, parser, mark, p))
 		return "opening and closing tag mismatch";
 	while (iswhite(*p)) ++p;
@@ -733,9 +749,17 @@ parse_attribute_name:
 parse_attribute_value:
 	while (iswhite(*p)) ++p;
 	quote = *p++;
+	mark = p;
+
+	/* special case for handling MOBI filepos=00000 syntax */
+	if (quote >= '0' && quote <= '9') {
+		while (*p >= '0' && *p <= '9') ++p;
+		xml_emit_att_value(ctx, parser, mark, p);
+		goto parse_attributes;
+	}
+
 	if (quote != '"' && quote != '\'')
 		return "missing quote character";
-	mark = p;
 	while (*p && *p != quote) ++p;
 	if (*p == quote) {
 		xml_emit_att_value(ctx, parser, mark, p++);
@@ -744,9 +768,78 @@ parse_attribute_value:
 	return "end of data in attribute value";
 }
 
+static int fast_tolower(int c) {
+	if ((unsigned)c - 'A' < 26)
+		return c | 32;
+	return c;
+}
+
+static int fast_strncasecmp(const char *a, const char *b, size_t n)
+{
+	if (!n--)
+		return 0;
+	for (; *a && *b && n && fast_tolower(*a) == fast_tolower(*b); a++, b++, n--)
+		;
+	return fast_tolower(*a) - fast_tolower(*b);
+}
+
+static char *fast_strcasestr(char *h, char *n)
+{
+	int n0 = fast_tolower(*n++);
+	size_t nn = strlen(n);
+	while (*h != 0)
+	{
+		if (fast_tolower(*h) == n0 && fast_strncasecmp(h+1, n, nn) == 0)
+			return h;
+		++h;
+	}
+	return NULL;
+}
+
 static int startswith(const char *a, const char *b)
 {
-	return !fz_strncasecmp(a, b, strlen(b));
+	return !fast_strncasecmp(a, b, strlen(b));
+}
+
+// Look for encoding in <meta http-equiv="content-type" content="text/html; charset=XXX"> tags
+static const unsigned short *find_meta_encoding(char *s)
+{
+	const unsigned short *table = NULL;
+	char *end, *meta;
+
+	meta = fast_strcasestr(s, "<meta");
+	while (meta && !table)
+	{
+		end = strchr(meta, '>');
+		if (end)
+		{
+			*end = 0;
+			if (fast_strcasestr(meta, "http-equiv") && fast_strcasestr(meta, "content-type"))
+			{
+				char *charset = fast_strcasestr(meta, "charset=");
+				if (charset)
+				{
+					char *enc = charset + 8;
+					if (startswith(enc, "iso-8859-1") || startswith(enc, "latin1"))
+						table = fz_unicode_from_iso8859_1;
+					else if (startswith(enc, "iso-8859-7") || startswith(enc, "greek"))
+						table = fz_unicode_from_iso8859_7;
+					else if (startswith(enc, "koi8"))
+						table = fz_unicode_from_koi8u;
+					else if (startswith(enc, "windows-1250"))
+						table = fz_unicode_from_windows_1250;
+					else if (startswith(enc, "windows-1251"))
+						table = fz_unicode_from_windows_1251;
+					else if (startswith(enc, "windows-1252"))
+						table = fz_unicode_from_windows_1252;
+				}
+			}
+			*end = '>';
+		}
+		meta = fast_strcasestr(meta + 5, "<meta");
+	}
+
+	return table;
 }
 
 static const unsigned short *find_xml_encoding(char *s)
@@ -781,6 +874,9 @@ static const unsigned short *find_xml_encoding(char *s)
 		}
 		*end = '>';
 	}
+
+	if (!table)
+		table = find_meta_encoding(s);
 
 	return table;
 }
@@ -836,6 +932,60 @@ static char *convert_to_utf8(fz_context *ctx, unsigned char *s, size_t n, int *d
 		return (char*)s+3;
 
 	return (char*)s;
+}
+
+fz_xml *
+fz_parse_xml_stream(fz_context *ctx, fz_stream *stm, int preserve_white)
+{
+	fz_buffer *buf = fz_read_all(ctx, stm, 128);
+	fz_xml *xml = NULL;
+
+	fz_var(xml);
+
+	fz_try(ctx)
+		xml = fz_parse_xml(ctx, buf, preserve_white);
+	fz_always(ctx)
+		fz_drop_buffer(ctx, buf);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+
+	return xml;
+}
+
+static fz_xml *
+parse_and_drop_buffer(fz_context *ctx, fz_buffer *buf, int preserve_white)
+{
+	fz_xml *xml = NULL;
+
+	fz_var(xml);
+
+	fz_try(ctx)
+		xml = fz_parse_xml(ctx, buf, preserve_white);
+	fz_always(ctx)
+		fz_drop_buffer(ctx, buf);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+
+	return xml;
+}
+
+fz_xml *
+fz_parse_xml_archive_entry(fz_context *ctx, fz_archive *arch, const char *filename, int preserve_white)
+{
+	fz_buffer *buf = fz_read_archive_entry(ctx, arch, filename);
+
+	return parse_and_drop_buffer(ctx, buf, preserve_white);
+}
+
+fz_xml *
+fz_try_parse_xml_archive_entry(fz_context *ctx, fz_archive *arch, const char *filename, int preserve_white)
+{
+	fz_buffer *buf = fz_try_read_archive_entry(ctx, arch, filename);
+
+	if (buf == NULL)
+		return NULL;
+
+	return parse_and_drop_buffer(ctx, buf, preserve_white);
 }
 
 fz_xml *
@@ -1078,6 +1228,11 @@ fz_parse_xml_from_html5(fz_context *ctx, fz_buffer *buf)
 
 fz_xml *fz_xml_find_dfs(fz_xml *item, const char *tag, const char *att, const char *match)
 {
+	return fz_xml_find_dfs_top(item, tag, att, match, NULL);
+}
+
+fz_xml *fz_xml_find_dfs_top(fz_xml *item, const char *tag, const char *att, const char *match, fz_xml *top)
+{
 	/* Skip over any DOC object. */
 	if (item && FZ_DOCUMENT_ITEM(item))
 		item = item->down;
@@ -1097,6 +1252,9 @@ fz_xml *fz_xml_find_dfs(fz_xml *item, const char *tag, const char *att, const ch
 		else
 			while (1) {
 				item = item->up;
+				/* Stop searching if we hit our declared 'top' item. */
+				if (item == top)
+					return NULL;
 				/* We should never reach item == NULL, but just in case. */
 				if (item == NULL)
 					return NULL;
@@ -1116,6 +1274,11 @@ fz_xml *fz_xml_find_dfs(fz_xml *item, const char *tag, const char *att, const ch
 
 fz_xml *fz_xml_find_next_dfs(fz_xml *item, const char *tag, const char *att, const char *match)
 {
+	return fz_xml_find_next_dfs_top(item, tag, att, match, NULL);
+}
+
+fz_xml *fz_xml_find_next_dfs_top(fz_xml *item, const char *tag, const char *att, const char *match, fz_xml *top)
+{
 	/* Skip over any DOC object. */
 	if (item && FZ_DOCUMENT_ITEM(item))
 		item = item->down;
@@ -1130,6 +1293,9 @@ fz_xml *fz_xml_find_next_dfs(fz_xml *item, const char *tag, const char *att, con
 	else
 		while (1) {
 			item = item->up;
+			/* Stop searching if we hit our declared 'top' item. */
+			if (item == top)
+				return NULL;
 			/* We should never reach item == NULL, but just in case. */
 			if (item == NULL)
 				return NULL;
@@ -1143,7 +1309,7 @@ fz_xml *fz_xml_find_next_dfs(fz_xml *item, const char *tag, const char *att, con
 			}
 		}
 
-	return fz_xml_find_dfs(item, tag, att, match);
+	return fz_xml_find_dfs_top(item, tag, att, match, top);
 }
 
 fz_xml *fz_keep_xml(fz_context *ctx, fz_xml *xml)

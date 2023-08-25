@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 /*
  * PDF merge tool: Tool for merging pdf content.
@@ -230,19 +230,15 @@ static void merge_range(fz_context *ctx, const char *range)
 	fz_outline_iterator *it_src = NULL;
 	fz_outline_iterator *it_dst = NULL;
 	int pages_merged = 0;
-	int page_tree_loaded = 0;
 
 	count = pdf_count_pages(ctx, doc_src);
 	graft_map = pdf_new_graft_map(ctx, doc_des);
 
 	fz_var(it_src);
 	fz_var(it_dst);
-	fz_var(page_tree_loaded);
 
 	fz_try(ctx)
 	{
-		pdf_load_page_tree(ctx, doc_src);
-		page_tree_loaded = 1;
 		r = range;
 		while ((r = fz_parse_page_range(ctx, r, &start, &end, count)))
 		{
@@ -283,8 +279,6 @@ static void merge_range(fz_context *ctx, const char *range)
 		fz_drop_outline_iterator(ctx, it_src);
 		fz_drop_outline_iterator(ctx, it_dst);
 		pdf_drop_graft_map(ctx, graft_map);
-		if (page_tree_loaded)
-			pdf_drop_page_tree(ctx, doc_src);
 	}
 	fz_catch(ctx)
 	{
@@ -329,7 +323,8 @@ int pdfmerge_main(int argc, char **argv)
 	}
 	fz_catch(ctx)
 	{
-		fprintf(stderr, "error: Cannot create destination document.\n");
+		fz_log_error(ctx, fz_caught_message(ctx));
+		fz_log_error(ctx, "Cannot create destination document.");
 		fz_flush_warnings(ctx);
 		fz_drop_context(ctx);
 		exit(1);
@@ -352,7 +347,10 @@ int pdfmerge_main(int argc, char **argv)
 		fz_always(ctx)
 			pdf_drop_document(ctx, doc_src);
 		fz_catch(ctx)
-			fprintf(stderr, "error: Cannot merge document '%s'.\n", input);
+		{
+			fz_log_error(ctx, fz_caught_message(ctx));
+			fz_log_error_printf(ctx, "Cannot merge document '%s'.", input);
+		}
 	}
 
 	if (fz_optind == argc)
@@ -360,7 +358,10 @@ int pdfmerge_main(int argc, char **argv)
 		fz_try(ctx)
 			pdf_save_document(ctx, doc_des, output, &opts);
 		fz_catch(ctx)
-			fprintf(stderr, "error: Cannot save output file: '%s'.\n", output);
+		{
+			fz_log_error(ctx, fz_caught_message(ctx));
+			fz_log_error_printf(ctx, "Cannot save output file: '%s'.", output);
+		}
 	}
 
 	pdf_drop_document(ctx, doc_des);

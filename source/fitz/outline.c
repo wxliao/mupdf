@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -106,13 +106,16 @@ load_outline_sub(fz_context *ctx, fz_outline_iterator *iter, fz_outline **tail, 
 		node->refs = 1;
 		node->title = *t;
 		node->uri = *u;
+		node->page.chapter = -1;
+		node->page.page = -1;
 		*t = NULL;
 		*u = NULL;
-		node->page = fz_resolve_link(ctx, iter->doc, node->uri, &node->x, &node->y);
 		*tail = node;
 		tail = &node->next;
 		onode = node;
 		node = NULL;
+
+		onode->page = fz_resolve_link(ctx, iter->doc, onode->uri, &onode->x, &onode->y);
 
 		res = fz_outline_iterator_down(ctx, iter);
 		if (res == 0)
@@ -140,6 +143,7 @@ fz_load_outline_from_iterator(fz_context *ctx, fz_outline_iterator *iter)
 		fz_drop_outline_iterator(ctx, iter);
 	fz_catch(ctx)
 	{
+		fz_drop_outline(ctx, head);
 		fz_free(ctx, title);
 		fz_free(ctx, uri);
 		fz_rethrow(ctx);

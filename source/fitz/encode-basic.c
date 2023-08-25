@@ -17,12 +17,14 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
 #include "z-imp.h"
+
+#include <limits.h>
 
 struct ahx
 {
@@ -329,7 +331,7 @@ struct deflate
 {
 	fz_output *chain;
 	z_stream z;
-	size_t bufsize;
+	uInt bufsize;
 	unsigned char *buf;
 };
 
@@ -337,11 +339,12 @@ static void deflate_write(fz_context *ctx, void *opaque, const void *data, size_
 {
 	struct deflate *state = opaque;
 	const unsigned char *p = data;
-	size_t newbufsize;
+	uLong newbufsizeLong;
+	uInt newbufsize;
 	int err;
 
-	newbufsize = n >= UINT_MAX ? UINT_MAX : deflateBound(&state->z, n);
-	newbufsize = newbufsize >= UINT_MAX ? UINT_MAX : newbufsize;
+	newbufsizeLong = n >= UINT_MAX ? UINT_MAX : deflateBound(&state->z, (uLong)n);
+	newbufsize = (uInt)(newbufsizeLong >= UINT_MAX ? UINT_MAX : newbufsizeLong);
 
 	if (state->buf == NULL)
 	{

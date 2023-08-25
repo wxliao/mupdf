@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2022 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 /* Buffer interface */
 
@@ -328,4 +328,26 @@ FUN(Buffer_save)(JNIEnv *env, jobject self, jstring jfilename)
 			(*env)->ReleaseStringUTFChars(env, jfilename, filename);
 	fz_catch(ctx)
 		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(Buffer_slice)(JNIEnv *env, jobject self, jint start, jint end)
+{
+	fz_context *ctx = get_context(env);
+	fz_buffer *buf = from_Buffer(env, self);
+	fz_buffer *copy = NULL;
+	jobject jcopy = NULL;
+
+	if (!ctx || !buf) return NULL;
+
+	fz_try(ctx)
+		copy = fz_slice_buffer(ctx, buf, start, end);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	jcopy = (*env)->NewObject(env, cls_Buffer, mid_Buffer_init, copy);
+	if (!jcopy || (*env)->ExceptionCheck(env))
+		return NULL;
+
+	return jcopy;
 }

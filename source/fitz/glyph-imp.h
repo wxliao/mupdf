@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #ifndef FITZ_GLYPH_IMP_H
 #define FITZ_GLYPH_IMP_H
@@ -108,6 +108,6 @@ fz_glyph *fz_render_t3_glyph(fz_context *ctx, fz_font *font, int cid, fz_matrix 
 fz_pixmap *fz_render_t3_glyph_pixmap(fz_context *ctx, fz_font *font, int cid, fz_matrix trm, fz_colorspace *model, const fz_irect *scissor, int aa);
 fz_glyph *fz_render_ft_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix trm, fz_matrix ctm, const fz_stroke_state *state, int aa);
 fz_glyph *fz_render_glyph(fz_context *ctx, fz_font*, int gid, fz_matrix *, fz_colorspace *model, const fz_irect *scissor, int alpha, int aa);
-fz_glyph *fz_render_stroked_glyph(fz_context *ctx, fz_font*, int, fz_matrix *, fz_matrix, const fz_stroke_state *stroke, const fz_irect *scissor, int aa);
+fz_glyph *fz_render_stroked_glyph(fz_context *ctx, fz_font*, int, fz_matrix *, fz_matrix, fz_colorspace *model, const fz_stroke_state *stroke, const fz_irect *scissor, int aa);
 
 #endif

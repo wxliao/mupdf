@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
@@ -48,6 +48,11 @@ pdf_lookup_name_imp(fz_context *ctx, pdf_obj *node, pdf_obj *needle, pdf_cycle_l
 			pdf_obj *first = pdf_array_get(ctx, limits, 0);
 			pdf_obj *last = pdf_array_get(ctx, limits, 1);
 
+			if (!pdf_is_indirect(ctx, kid))
+			{
+				fz_warn(ctx, "non-indirect internal node found in name tree");
+				break;
+			}
 			if (pdf_objcmp(ctx, needle, first) < 0)
 				r = m - 1;
 			else if (pdf_objcmp(ctx, needle, last) > 0)
@@ -68,8 +73,13 @@ pdf_lookup_name_imp(fz_context *ctx, pdf_obj *node, pdf_obj *needle, pdf_cycle_l
 		r = pdf_array_len(ctx, kids);
 		for (l = 0; l < r; l++)
 		{
-			pdf_obj *kid = pdf_array_get(ctx, kids, l);
-			pdf_obj *obj = pdf_lookup_name_imp(ctx, kid, needle, &cycle);
+			pdf_obj *obj, *kid = pdf_array_get(ctx, kids, l);
+			if (!pdf_is_indirect(ctx, kid))
+			{
+				fz_warn(ctx, "non-indirect internal node found in name tree");
+				continue;
+			}
+			obj = pdf_lookup_name_imp(ctx, kid, needle, &cycle);
 			if (obj)
 				return obj;
 		}

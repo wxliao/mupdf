@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -755,7 +755,10 @@ compressed_image_get_pixmap(fz_context *ctx, fz_image *image_, fz_irect *subarea
 		tile = fz_load_jxr(ctx, image->buffer->buffer->data, image->buffer->buffer->len);
 		break;
 	case FZ_IMAGE_JPX:
-		tile = fz_load_jpx(ctx, image->buffer->buffer->data, image->buffer->buffer->len, NULL);
+		tile = fz_load_jpx(ctx, image->buffer->buffer->data, image->buffer->buffer->len, image->super.colorspace);
+		break;
+	case FZ_IMAGE_PSD:
+		tile = fz_load_psd(ctx, image->buffer->buffer->data, image->buffer->buffer->len);
 		break;
 	case FZ_IMAGE_JPEG:
 		/* Scan JPEG stream and patch missing height values in header */
@@ -763,7 +766,7 @@ compressed_image_get_pixmap(fz_context *ctx, fz_image *image_, fz_irect *subarea
 			unsigned char *s = image->buffer->buffer->data;
 			unsigned char *e = s + image->buffer->buffer->len;
 			unsigned char *d;
-			for (d = s + 2; s < d && d < e - 9 && d[0] == 0xFF; d += (d[2] << 8 | d[3]) + 2)
+			for (d = s + 2; s < d && d + 9 < e && d[0] == 0xFF; d += (d[2] << 8 | d[3]) + 2)
 			{
 				if (d[1] < 0xC0 || (0xC3 < d[1] && d[1] < 0xC9) || 0xCB < d[1])
 					continue;
@@ -791,15 +794,6 @@ compressed_image_get_pixmap(fz_context *ctx, fz_image *image_, fz_irect *subarea
 			fz_drop_stream(ctx, stm);
 		fz_catch(ctx)
 			fz_rethrow(ctx);
-
-		/* CMYK JPEGs in XPS documents have to be inverted */
-		if (image->super.invert_cmyk_jpeg &&
-			image->buffer->params.type == FZ_IMAGE_JPEG &&
-			fz_colorspace_is_cmyk(ctx, image->super.colorspace) &&
-			image->buffer->params.u.jpeg.color_transform)
-		{
-			fz_invert_pixmap(ctx, tile);
-		}
 
 		break;
 	}
@@ -1095,7 +1089,6 @@ fz_new_image_of_size(fz_context *ctx, int w, int h, int bpc, fz_colorspace *colo
 	image->bpc = bpc;
 	image->n = (colorspace ? fz_colorspace_n(ctx, colorspace) : 1);
 	image->colorspace = fz_keep_colorspace(ctx, colorspace);
-	image->invert_cmyk_jpeg = 1;
 	image->interpolate = interpolate;
 	image->imagemask = imagemask;
 	image->use_colorkey = (colorkey != NULL);
@@ -1205,6 +1198,51 @@ void fz_set_pixmap_image_tile(fz_context *ctx, fz_pixmap_image *image, fz_pixmap
 	((fz_pixmap_image *)image)->tile = pix;
 }
 
+const char *
+fz_image_type_name(int type)
+{
+	switch (type)
+	{
+	default:
+	case FZ_IMAGE_UNKNOWN: return "unknown";
+	case FZ_IMAGE_RAW: return "raw";
+	case FZ_IMAGE_FAX: return "fax";
+	case FZ_IMAGE_FLATE: return "flate";
+	case FZ_IMAGE_LZW: return "lzw";
+	case FZ_IMAGE_RLD: return "rld";
+	case FZ_IMAGE_BMP: return "bmp";
+	case FZ_IMAGE_GIF: return "gif";
+	case FZ_IMAGE_JBIG2: return "jbig2";
+	case FZ_IMAGE_JPEG: return "jpeg";
+	case FZ_IMAGE_JPX: return "jpx";
+	case FZ_IMAGE_JXR: return "jxr";
+	case FZ_IMAGE_PNG: return "png";
+	case FZ_IMAGE_PNM: return "pnm";
+	case FZ_IMAGE_TIFF: return "tiff";
+	}
+}
+
+int
+fz_lookup_image_type(const char *type)
+{
+	if (type == NULL) return FZ_IMAGE_UNKNOWN;
+	if (!strcmp(type, "raw")) return FZ_IMAGE_RAW;
+	if (!strcmp(type, "fax")) return FZ_IMAGE_FAX;
+	if (!strcmp(type, "flate")) return FZ_IMAGE_FLATE;
+	if (!strcmp(type, "lzw")) return FZ_IMAGE_LZW;
+	if (!strcmp(type, "rld")) return FZ_IMAGE_RLD;
+	if (!strcmp(type, "bmp")) return FZ_IMAGE_BMP;
+	if (!strcmp(type, "gif")) return FZ_IMAGE_GIF;
+	if (!strcmp(type, "jbig2")) return FZ_IMAGE_JBIG2;
+	if (!strcmp(type, "jpeg")) return FZ_IMAGE_JPEG;
+	if (!strcmp(type, "jpx")) return FZ_IMAGE_JPX;
+	if (!strcmp(type, "jxr")) return FZ_IMAGE_JXR;
+	if (!strcmp(type, "png")) return FZ_IMAGE_PNG;
+	if (!strcmp(type, "pnm")) return FZ_IMAGE_PNM;
+	if (!strcmp(type, "tiff")) return FZ_IMAGE_TIFF;
+	return FZ_IMAGE_UNKNOWN;
+}
+
 int
 fz_recognize_image_format(fz_context *ctx, unsigned char p[8])
 {
@@ -1237,6 +1275,8 @@ fz_recognize_image_format(fz_context *ctx, unsigned char p[8])
 	if (p[0] == 0x97 && p[1] == 'J' && p[2] == 'B' && p[3] == '2' &&
 		p[4] == '\r' && p[5] == '\n'  && p[6] == 0x1a && p[7] == '\n')
 		return FZ_IMAGE_JBIG2;
+	if (p[0] == '8' && p[1] == 'B' && p[2] == 'P' && p[3] == 'S')
+		return FZ_IMAGE_PSD;
 	return FZ_IMAGE_UNKNOWN;
 }
 
@@ -1271,6 +1311,9 @@ fz_new_image_from_buffer(fz_context *ctx, fz_buffer *buffer)
 		break;
 	case FZ_IMAGE_PNG:
 		fz_load_png_info(ctx, buf, len, &w, &h, &xres, &yres, &cspace);
+		break;
+	case FZ_IMAGE_PSD:
+		fz_load_psd_info(ctx, buf, len, &w, &h, &xres, &yres, &cspace);
 		break;
 	case FZ_IMAGE_JXR:
 		fz_load_jxr_info(ctx, buf, len, &w, &h, &xres, &yres, &cspace);

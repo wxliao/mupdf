@@ -8,8 +8,8 @@ Notes:
     When building an sdist (e.g. with 'pip sdist'), we use clang-python to
     generate C++ source which is then included in the sdist.
 
-    Thus when we are in an sdist and are installing or building a wheel, we
-    don't need clang-python .
+    This allows wheels to be built from an sdist without requiring clang-python
+    to be installed.
 
 
 Internal testing only - environmental variables:
@@ -65,6 +65,11 @@ def root_dir():
 def windows():
     s = platform.system()
     return s == 'Windows' or s.startswith('CYGWIN')
+
+@cache
+def macos():
+    s = platform.system()
+    return s == 'Darwin'
 
 @cache
 def build_dir():
@@ -207,6 +212,23 @@ def sdist():
 
     paths = pipcl.git_items( root_dir(), submodules=True)
 
+    # Strip out some large test directories.
+    i = 0
+    while i < len( paths):
+        path = paths[i]
+        remove = False
+        if (0
+                or path.startswith( 'thirdparty/harfbuzz/test/')
+                or path.startswith( 'thirdparty/tesseract/test/')
+                or path.startswith( 'thirdparty/extract/test/')
+                ):
+            remove = True
+        if remove:
+            #log( f'Excluding: {path}')
+            del paths[i]
+        else:
+            i += 1
+
     # Build C++ files and SWIG C code for inclusion in sdist, so that it can be
     # used on systems without clang-python or SWIG.
     #
@@ -217,20 +239,14 @@ def sdist():
         b += '0'
     if use_swig:
         b += '2'
-    extra = ' --swig-windows-auto' if windows() else ''
     command = '' if os.getcwd() == root_dir() else f'cd {os.path.relpath(root_dir())} && '
-    command += f'{sys.executable} ./scripts/mupdfwrap.py{extra} -d {build_dir()} -b "{b}"'
+    command += f'{sys.executable} ./scripts/mupdfwrap.py -d {build_dir()} -b "{b}"'
     log(f'Running: {command}')
     subprocess.check_call(command, shell=True)
     paths += [
             'build/shared-release/mupdf.py',
             'git-info',
-            'platform/c++/c_enums.pickle',
-            'platform/c++/c_functions.pickle',
-            'platform/c++/c_globals.pickle',
-            'platform/c++/container_classnames.pickle',
-            'platform/c++/cpp_files.pickle',
-            'platform/c++/h_files.pickle',
+            'platform/c++/generated.pickle',
             'platform/c++/implementation/classes.cpp',
             'platform/c++/implementation/classes2.cpp',
             'platform/c++/implementation/exceptions.cpp',
@@ -241,11 +257,6 @@ def sdist():
             'platform/c++/include/mupdf/exceptions.h',
             'platform/c++/include/mupdf/functions.h',
             'platform/c++/include/mupdf/internal.h',
-            'platform/c++/swig_cpp.pickle',
-            'platform/c++/swig_csharp.pickle',
-            'platform/c++/swig_python.pickle',
-            'platform/c++/to_string_structnames.pickle',
-            'platform/c++/virtual_fnptrs.pickle',
             'platform/c++/windows_mupdf.def',
             'platform/python/mupdfcpp_swig.cpp',
             ]
@@ -277,7 +288,6 @@ def build():
     command = '' if root_dir() == os.getcwd() else f'cd {os.path.relpath(root_dir())} && '
     command += (
             f'"{sys.executable}" ./scripts/mupdfwrap.py'
-            f'{" --swig-windows-auto" if windows() else ""}'
             f' -d {build_dir()}'
             f' -b {b}'
             )
@@ -298,6 +308,16 @@ def build():
                 f'mupdfcpp{infix}.dll', # C and C++.
                 '_mupdf.pyd',           # Python internals.
                 'mupdf.py',             # Python.
+                ]
+    elif macos():
+        log( f'Contents of {build_dir()} are:')
+        for leaf in os.listdir(build_dir()):
+            log( f'    {leaf}')
+        names = [
+                'libmupdf.dylib',   # C.
+                'libmupdfcpp.so',   # C++.
+                '_mupdf.so',        # Python internals.
+                'mupdf.py',         # Python.
                 ]
     else:
         names = [

@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2022 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 /* Page interface */
 
@@ -57,7 +57,7 @@ FUN(Page_toPixmap)(JNIEnv *env, jobject self, jobject jctm, jobject jcs, jboolea
 }
 
 JNIEXPORT jobject JNICALL
-FUN(Page_getBounds)(JNIEnv *env, jobject self)
+FUN(Page_getBoundsNative)(JNIEnv *env, jobject self, jint box)
 {
 	fz_context *ctx = get_context(env);
 	fz_page *page = from_Page(env, self);
@@ -66,7 +66,7 @@ FUN(Page_getBounds)(JNIEnv *env, jobject self)
 	if (!ctx || !page) return NULL;
 
 	fz_try(ctx)
-		rect = fz_bound_page(ctx, page);
+		rect = fz_bound_page_box(ctx, page, box);
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
@@ -445,4 +445,22 @@ FUN(Page_getDocument)(JNIEnv *env, jobject self)
 	if (!ctx || !page || !doc) return NULL;
 
 	return to_Document_safe_own(ctx, env, fz_keep_document(ctx, doc));
+}
+
+JNIEXPORT jstring JNICALL
+FUN(Page_getLabel)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	fz_page *page = from_Page(env, self);
+	char buf[100];
+
+	if (!ctx || !page)
+		return NULL;
+
+	fz_try(ctx)
+		fz_page_label(ctx, page, buf, sizeof buf);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return (*env)->NewStringUTF(env, buf);
 }

@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "svg-imp.h"
@@ -291,7 +291,7 @@ svg_parse_color(fz_context *ctx, svg_document *doc, const char *str, float *rgb)
 		*p = 0;
 
 		l = 0;
-		r = sizeof(svg_predefined_colors) / sizeof(svg_predefined_colors[0]);
+		r = nelem(svg_predefined_colors) - 1;
 
 		while (l <= r)
 		{

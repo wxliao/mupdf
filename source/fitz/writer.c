@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2021 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -111,6 +111,16 @@ fz_document_writer *fz_new_document_writer_of_size(fz_context *ctx, size_t size,
 	return wri;
 }
 
+static void fz_save_pixmap_as_jpeg_default(fz_context *ctx, fz_pixmap *pixmap, const char *filename)
+{
+	fz_save_pixmap_as_jpeg(ctx, pixmap, filename, 90);
+}
+
+fz_document_writer *fz_new_jpeg_pixmap_writer(fz_context *ctx, const char *path, const char *options)
+{
+	return fz_new_pixmap_writer(ctx, path, options, "out-%04d.jpeg", 0, fz_save_pixmap_as_jpeg_default);
+}
+
 fz_document_writer *fz_new_png_pixmap_writer(fz_context *ctx, const char *path, const char *options)
 {
 	return fz_new_pixmap_writer(ctx, path, options, "out-%04d.png", 0, fz_save_pixmap_as_png);
@@ -198,6 +208,8 @@ fz_new_document_writer(fz_context *ctx, const char *path, const char *explicit_f
 			return fz_new_pbm_pixmap_writer(ctx, path, options);
 		if (is_extension(format, "pkm"))
 			return fz_new_pkm_pixmap_writer(ctx, path, options);
+		if (is_extension(format, "jpeg") || is_extension(format, "jpg"))
+			return fz_new_jpeg_pixmap_writer(ctx, path, options);
 
 		if (is_extension(format, "pcl"))
 			return fz_new_pcl_writer(ctx, path, options);
@@ -277,6 +289,20 @@ fz_new_document_writer_with_output(fz_context *ctx, fz_output *out, const char *
 #endif
 
 	fz_throw(ctx, FZ_ERROR_GENERIC, "unknown output document format: %s", format);
+}
+
+fz_document_writer *
+fz_new_document_writer_with_buffer(fz_context *ctx, fz_buffer *buffer, const char *format, const char *options)
+{
+	fz_document_writer *wri;
+	fz_output *out = fz_new_output_with_buffer(ctx, buffer);
+	fz_try(ctx)
+		wri = fz_new_document_writer_with_output(ctx, out, format, options);
+	fz_always(ctx)
+		fz_drop_output(ctx, out);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+	return wri;
 }
 
 void

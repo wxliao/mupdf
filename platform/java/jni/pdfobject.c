@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2022 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 /* PDFObject interface */
 
@@ -455,7 +455,7 @@ FUN(PDFObject_getArray)(JNIEnv *env, jobject self, jint index)
 }
 
 JNIEXPORT jobject JNICALL
-FUN(PDFObject_getDictionary)(JNIEnv *env, jobject self, jstring jname)
+FUN(PDFObject_getDictionary)(JNIEnv *env, jobject self, jstring jname, jboolean inheritable)
 {
 	fz_context *ctx = get_context(env);
 	pdf_obj *dict = from_PDFObject(env, self);
@@ -471,7 +471,10 @@ FUN(PDFObject_getDictionary)(JNIEnv *env, jobject self, jstring jname)
 	if (!name) jni_throw_run(env, "cannot get name to lookup");
 
 	fz_try(ctx)
-		val = pdf_dict_gets(ctx, dict, name);
+		if (inheritable)
+			val = pdf_dict_gets_inheritable(ctx, dict, name);
+		else
+			val = pdf_dict_gets(ctx, dict, name);
 	fz_always(ctx)
 		(*env)->ReleaseStringUTFChars(env, jname, name);
 	fz_catch(ctx)
@@ -1229,4 +1232,27 @@ FUN(PDFObject_toString)(JNIEnv *env, jobject self, jboolean tight, jboolean asci
 		jni_rethrow(env, ctx);
 
 	return string;
+}
+
+JNIEXPORT jboolean JNICALL
+FUN(PDFObject_equals)(JNIEnv *env, jobject self, jobject jother)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *obj = from_PDFObject_safe(env, self);
+	pdf_obj *other = NULL;
+	int result = 0;
+
+	if (!ctx) return JNI_FALSE;
+
+	if (!(*env)->IsInstanceOf(env, jother, cls_PDFObject))
+		return JNI_FALSE;
+
+	other = from_PDFObject_safe(env, jother);
+
+	fz_try(ctx)
+		result = pdf_objcmp(ctx, obj, other);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return result == 0 ? JNI_TRUE : JNI_FALSE;
 }

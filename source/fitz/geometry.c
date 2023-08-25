@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -423,16 +423,16 @@ fz_irect
 fz_round_rect(fz_rect r)
 {
 	fz_irect b;
-	int i;
+	float f;
 
-	i = floorf(r.x0 + 0.001f);
-	b.x0 = fz_clamp(i, MIN_SAFE_INT, MAX_SAFE_INT);
-	i = floorf(r.y0 + 0.001f);
-	b.y0 = fz_clamp(i, MIN_SAFE_INT, MAX_SAFE_INT);
-	i = ceilf(r.x1 - 0.001f);
-	b.x1 = fz_clamp(i, MIN_SAFE_INT, MAX_SAFE_INT);
-	i = ceilf(r.y1 - 0.001f);
-	b.y1 = fz_clamp(i, MIN_SAFE_INT, MAX_SAFE_INT);
+	f = floorf(r.x0 + 0.001f);
+	b.x0 = fz_clamp(f, MIN_SAFE_INT, MAX_SAFE_INT);
+	f = floorf(r.y0 + 0.001f);
+	b.y0 = fz_clamp(f, MIN_SAFE_INT, MAX_SAFE_INT);
+	f = ceilf(r.x1 - 0.001f);
+	b.x1 = fz_clamp(f, MIN_SAFE_INT, MAX_SAFE_INT);
+	f = ceilf(r.y1 - 0.001f);
+	b.y1 = fz_clamp(f, MIN_SAFE_INT, MAX_SAFE_INT);
 
 	return b;
 }

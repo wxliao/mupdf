@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 
@@ -33,7 +33,7 @@ struct info
 	unsigned int width, height, depth, n;
 	enum fz_colorspace_type type;
 	int interlace, indexed;
-	unsigned int size;
+	size_t size;
 	unsigned char *samples;
 	unsigned char palette[256*4];
 	int transparency;
@@ -465,7 +465,7 @@ png_read_image(fz_context *ctx, struct info *info, const unsigned char *p, size_
 	{
 		if (!info->interlace)
 		{
-			info->size = info->height * (1 + (info->width * info->n * info->depth + 7) / 8);
+			info->size = info->height * (1 + ((size_t) info->width * info->n * info->depth + 7) / 8);
 		}
 		else
 		{
@@ -480,7 +480,7 @@ png_read_image(fz_context *ctx, struct info *info, const unsigned char *p, size_
 		stm.opaque = ctx;
 
 		stm.next_out = info->samples;
-		stm.avail_out = info->size;
+		stm.avail_out = (uInt)info->size;
 
 		code = inflateInit(&stm);
 		if (code != Z_OK)
@@ -636,7 +636,7 @@ fz_load_png(fz_context *ctx, const unsigned char *p, size_t total)
 {
 	fz_pixmap *image = NULL;
 	struct info png;
-	int stride;
+	size_t stride;
 	int alpha;
 
 	fz_var(image);
@@ -645,7 +645,7 @@ fz_load_png(fz_context *ctx, const unsigned char *p, size_t total)
 	{
 		png_read_image(ctx, &png, p, total, 0);
 
-		stride = (png.width * png.n * png.depth + 7) / 8;
+		stride = ((size_t) png.width * png.n * png.depth + 7) / 8;
 		alpha = (png.n == 2 || png.n == 4 || png.transparency);
 
 		if (png.indexed)

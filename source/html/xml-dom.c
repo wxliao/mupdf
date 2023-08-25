@@ -17,14 +17,14 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "html-imp.h"
 
 #include "string.h"
 
-fz_xml *fz_html_story_document(fz_context *ctx, fz_html_story *story)
+fz_xml *fz_story_document(fz_context *ctx, fz_story *story)
 {
 	if (story == NULL || story->dom == NULL)
 		return NULL;
@@ -415,7 +415,7 @@ fz_xml *fz_dom_first_child(fz_context *ctx, fz_xml *elt)
 {
 	elt = skip_doc_pointer(elt);
 
-	if (elt == NULL)
+	if (elt == NULL || FZ_TEXT_ITEM(elt))
 		return NULL;
 
 	return elt->down;

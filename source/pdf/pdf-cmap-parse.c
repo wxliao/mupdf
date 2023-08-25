@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
@@ -243,7 +243,7 @@ pdf_parse_bf_range_array(fz_context *ctx, pdf_cmap *cmap, fz_stream *file, pdf_l
 			for (i = 0; i < len; i++)
 				dst[i] = pdf_code_from_string(&buf->scratch[i * 2], 2);
 
-			pdf_map_one_to_many(ctx, cmap, lo, dst, buf->len / 2);
+			pdf_map_one_to_many(ctx, cmap, lo, dst, i);
 		}
 
 		lo ++;

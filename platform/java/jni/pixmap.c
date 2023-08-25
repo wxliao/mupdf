@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2022 Artifex Software, Inc.
+// Copyright (C) 2004-2023 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 /* Pixmap interface */
 
@@ -47,6 +47,26 @@ FUN(Pixmap_newNative)(JNIEnv *env, jobject self, jobject jcs, jint x, jint y, ji
 		pixmap->x = x;
 		pixmap->y = y;
 	}
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return jlong_cast(pixmap);
+}
+
+JNIEXPORT jlong JNICALL
+FUN(Pixmap_newNativeFromColorAndMask)(JNIEnv *env, jobject self, jobject jcolor, jobject jmask)
+{
+	fz_context *ctx = get_context(env);
+	fz_pixmap *color = from_Pixmap_safe(env, jcolor);
+	fz_pixmap *mask = from_Pixmap_safe(env, jmask);
+	fz_pixmap *pixmap = NULL;
+
+	if (!ctx) return 0;
+	if (!jcolor) jni_throw_arg(env, "color must not be null");
+	if (!jmask) jni_throw_arg(env, "mask must not be null");
+
+	fz_try(ctx)
+		pixmap = fz_new_pixmap_from_color_and_mask(ctx, color, mask);
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
@@ -96,6 +116,111 @@ FUN(Pixmap_saveAsPNG)(JNIEnv *env, jobject self, jstring jfilename)
 
 	fz_try(ctx)
 		fz_save_pixmap_as_png(ctx, pixmap, filename);
+	fz_always(ctx)
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(Pixmap_saveAsJPEG)(JNIEnv *env, jobject self, jstring jfilename, jint quality)
+{
+	fz_context *ctx = get_context(env);
+	fz_pixmap *pixmap = from_Pixmap(env, self);
+	const char *filename = "null";
+
+	if (!ctx || !pixmap) return;
+	if (!jfilename) jni_throw_arg_void(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename) return;
+
+	fz_try(ctx)
+		fz_save_pixmap_as_jpeg(ctx, pixmap, filename, quality);
+	fz_always(ctx)
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(Pixmap_saveAsPAM)(JNIEnv *env, jobject self, jstring jfilename)
+{
+	fz_context *ctx = get_context(env);
+	fz_pixmap *pixmap = from_Pixmap(env, self);
+	const char *filename = "null";
+
+	if (!ctx || !pixmap) return;
+	if (!jfilename) jni_throw_arg_void(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename) return;
+
+	fz_try(ctx)
+		fz_save_pixmap_as_pam(ctx, pixmap, filename);
+	fz_always(ctx)
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(Pixmap_saveAsPNM)(JNIEnv *env, jobject self, jstring jfilename)
+{
+	fz_context *ctx = get_context(env);
+	fz_pixmap *pixmap = from_Pixmap(env, self);
+	const char *filename = "null";
+
+	if (!ctx || !pixmap) return;
+	if (!jfilename) jni_throw_arg_void(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename) return;
+
+	fz_try(ctx)
+		fz_save_pixmap_as_pnm(ctx, pixmap, filename);
+	fz_always(ctx)
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(Pixmap_saveAsPBM)(JNIEnv *env, jobject self, jstring jfilename)
+{
+	fz_context *ctx = get_context(env);
+	fz_pixmap *pixmap = from_Pixmap(env, self);
+	const char *filename = "null";
+
+	if (!ctx || !pixmap) return;
+	if (!jfilename) jni_throw_arg_void(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename) return;
+
+	fz_try(ctx)
+		fz_save_pixmap_as_pbm(ctx, pixmap, filename);
+	fz_always(ctx)
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(Pixmap_saveAsPKM)(JNIEnv *env, jobject self, jstring jfilename)
+{
+	fz_context *ctx = get_context(env);
+	fz_pixmap *pixmap = from_Pixmap(env, self);
+	const char *filename = "null";
+
+	if (!ctx || !pixmap) return;
+	if (!jfilename) jni_throw_arg_void(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename) return;
+
+	fz_try(ctx)
+		fz_save_pixmap_as_pkm(ctx, pixmap, filename);
 	fz_always(ctx)
 		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
 	fz_catch(ctx)
@@ -308,4 +433,26 @@ FUN(Pixmap_setResolution)(JNIEnv *env, jobject self, jint xres, jint yres)
 		fz_set_pixmap_resolution(ctx, pixmap, xres, yres);
 	fz_catch(ctx)
 		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(Pixmap_convertToColorSpace)(JNIEnv *env, jobject self, jobject jcs, jobject jproof, jobject jdefaultcs, jint jcolorparams, jboolean keep_alpha)
+{
+	fz_context *ctx = get_context(env);
+	fz_pixmap *pixmap = from_Pixmap(env, self);
+	fz_colorspace *cs = from_ColorSpace(env, jcs);
+	fz_colorspace *proof = from_ColorSpace(env, jproof);
+	fz_default_colorspaces *default_cs = from_DefaultColorSpaces(env, jdefaultcs);
+	fz_color_params color_params = from_ColorParams_safe(env, jcolorparams);
+	fz_pixmap *dst = NULL;
+
+	if (!ctx || !pixmap) return NULL;
+	if (!cs) jni_throw_arg(env, "destination colorspace must not be null");
+
+	fz_try(ctx)
+		dst = fz_convert_pixmap(ctx, pixmap, cs, proof, default_cs, color_params, keep_alpha);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_Pixmap_safe_own(ctx, env, dst);
 }

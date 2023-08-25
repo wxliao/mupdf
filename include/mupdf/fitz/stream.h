@@ -17,8 +17,8 @@
 //
 // Alternative licensing terms are available from the licensor.
 // For commercial licensing, see <https://www.artifex.com/> or contact
-// Artifex Software, Inc., 1305 Grant Avenue - Suite 200, Novato,
-// CA 94945, U.S.A., +1(415)492-9861, for further information.
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
 
 #ifndef MUPDF_FITZ_STREAM_H
 #define MUPDF_FITZ_STREAM_H
@@ -54,6 +54,15 @@ typedef struct fz_stream fz_stream;
 	and Linux, the encoding they use is UTF-8 anyway).
 */
 fz_stream *fz_open_file(fz_context *ctx, const char *filename);
+
+/**
+	Open the named file and wrap it in a stream.
+
+	Does the same as fz_open_file, but in the event the file
+	does not open, it will return NULL rather than throw an
+	exception.
+*/
+fz_stream *fz_try_open_file(fz_context *ctx, const char *name);
 
 #ifdef _WIN32
 /**
@@ -181,6 +190,14 @@ fz_buffer *fz_read_all(fz_context *ctx, fz_stream *stm, size_t initial);
 fz_buffer *fz_read_file(fz_context *ctx, const char *filename);
 
 /**
+	Read all the contents of a file into a buffer.
+
+	Returns NULL if the file does not exist, otherwise
+	behaves exactly as fz_read_file.
+*/
+fz_buffer *fz_try_read_file(fz_context *ctx, const char *filename);
+
+/**
 	fz_read_[u]int(16|24|32|64)(_le)?
 
 	Read a 16/32/64 bit signed/unsigned integer from stream,
@@ -297,9 +314,12 @@ fz_stream *fz_new_stream(fz_context *ctx, void *state, fz_stream_next_fn *next, 
 
 	truncated: Flag to store success/failure indication in.
 
+	worst_case: 0 for unknown, otherwise an upper bound for the
+	size of the stream.
+
 	Returns a buffer created from reading from the stream.
 */
-fz_buffer *fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated);
+fz_buffer *fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated, size_t worst_case);
 
 /**
 	Read a line from stream into the buffer until either a
