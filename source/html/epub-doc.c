@@ -557,9 +557,9 @@ epub_make_bookmark(fz_context *ctx, fz_document *doc_, fz_location loc)
 		if (i == loc.chapter)
 		{
 			fz_html *html = epub_get_laid_out_html(ctx, doc, ch);
-			int seq = fz_make_html_bookmark(ctx, html, loc.page, loc.page_offset);
+			fz_bookmark mark = fz_make_html_bookmark(ctx, html, loc.page);
 			fz_drop_html(ctx, html);
-			return seq;
+			return mark;
 		}
 	}
 
@@ -570,26 +570,16 @@ static fz_location
 epub_lookup_bookmark(fz_context *ctx, fz_document *doc_, fz_bookmark mark)
 {
 	epub_document *doc = (epub_document*)doc_;
-    fz_flow_mark *flowMark = (fz_flow_mark*)mark;
 	epub_chapter *ch;
 	int i;
+
 	for (i = 0, ch = doc->spine; ch; ++i, ch = ch->next)
 	{
-        if(i==flowMark->chapter){
-            fz_html *html = epub_get_laid_out_html(ctx, doc, ch);
-            fz_html_flow *flow = fz_lookup_html_bookmark(ctx, html, flowMark->seq);
-            int y = 0;
-            if(flow){
-                y = (int)flow->y;
-            }
-            int page = y / (int)html->page_h;
-            int page_offset = y % (int)html->page_h;
-            fz_drop_html(ctx, html);
-
-
-            fz_location loc = {i,page,page_offset};
-            return loc;
-        }
+		fz_html *html = epub_get_laid_out_html(ctx, doc, ch);
+		int p = fz_lookup_html_bookmark(ctx, html, mark);
+		fz_drop_html(ctx, html);
+		if (p != -1)
+			return fz_make_location(i, p);
 	}
 	return fz_make_location(-1, -1);
 }

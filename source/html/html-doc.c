@@ -145,7 +145,7 @@ static fz_bookmark
 htdoc_make_bookmark(fz_context *ctx, fz_document *doc_, fz_location loc)
 {
 	html_document *doc = (html_document*)doc_;
-	return fz_make_html_bookmark(ctx, doc->html, loc.page, loc.page_offset);
+	return fz_make_html_bookmark(ctx, doc->html, loc.page);
 }
 
 static fz_location
